@@ -1,0 +1,43 @@
+# Gradle & Build Çıktıları
+.gradle/
+build/
+**/build/
+app/build/
+.kotlin/
+
+# Android Derleme & Paket Dosyaları
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.bin
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Yerel Yapılandırma & İmza Anahtarları
+local.properties
+*.jks
+*.keystore
+keystore.properties
+google-services.json
+
+# IDE & Editör Dosyaları
+*.iml
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# İşletim Sistemi & Log Dosyaları
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+*.hprof
+*.tmp
+
+# Gradle Wrapper JAR mutlaka takip edilsin
+!gradle/wrapper/gradle-wrapper.jar

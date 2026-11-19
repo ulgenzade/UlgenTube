@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Dış halka / medya dalga vurgusu -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,26A28,28 0 1,1 26,54"
+        android:strokeWidth="3.2"
+        android:strokeColor="#66FF2E63"
+        android:strokeLineCap="round" />
+
+    <!-- Oynatma üçgeni ile birleşik modern indirme oku gövdesi -->
+    <path android:pathData="M48,30 L60,30 C61.66,30 63,31.34 63,33 L63,52 L71.5,52 C73.7,52 74.8,54.65 73.25,56.2 L55.75,73.7 C54.78,74.67 53.22,74.67 52.25,73.7 L34.75,56.2 C33.2,54.65 34.3,52 36.5,52 L45,52 L45,33 C45,31.34 46.34,30 48,30 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:endX="74"
+                android:endY="75"
+                android:startX="34"
+                android:startY="30"
+                android:type="linear">
+                <item
+                    android:color="#FFFF2E63"
+                    android:offset="0.0" />
+                <item
+                    android:color="#FFFF6B4A"
+                    android:offset="0.55" />
+                <item
+                    android:color="#FFFFB830"
+                    android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Okun içinde minimalist beyaz oynatma (play) simgesi -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M50.5,39.5 L59.5,45 L50.5,50.5 Z" />
+
+    <!-- Alt dalga / indirme tepsisi çizgisi -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M34,78 C40,81 47,81 54,81 C61,81 68,81 74,78"
+        android:strokeWidth="3.8"
+        android:strokeColor="#FF00E5FF"
+        android:strokeLineCap="round" />
+</vector>
