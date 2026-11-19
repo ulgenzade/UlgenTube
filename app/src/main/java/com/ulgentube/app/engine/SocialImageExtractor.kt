@@ -5,6 +5,7 @@ import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaCategory
 import com.ulgentube.app.domain.model.MediaFormatOption
 import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.util.NetworkSecurityGuard
 import com.ulgentube.app.util.UrlSanitizer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -35,15 +36,50 @@ class SocialImageExtractor(
         url: String,
         platform: PlatformType
     ): ExtractedMedia = withContext(Dispatchers.IO) {
-        if (platform == PlatformType.DIRECT_IMAGE || isImageContentType(url)) {
-            return@withContext extractDirectImage(url)
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url)
+            ?: throw IllegalArgumentException("Geçersiz veya güvensiz bağlantı.")
+
+        val rawMedia = if (platform == PlatformType.DIRECT_IMAGE || isImageContentType(safeUrl)) {
+            extractDirectImage(safeUrl)
+        } else {
+            when (platform) {
+                PlatformType.TWITTER_X -> extractTwitter(safeUrl)
+                PlatformType.REDDIT -> extractReddit(safeUrl)
+                else -> extractFromWebPage(safeUrl, platform)
+            }
         }
 
-        return@withContext when (platform) {
-            PlatformType.TWITTER_X -> extractTwitter(url)
-            PlatformType.REDDIT -> extractReddit(url)
-            else -> extractFromWebPage(url, platform)
+        val sanitized = sanitizeExtractedMedia(rawMedia)
+        if (sanitized.videoFormats.isEmpty() &&
+            sanitized.audioFormats.isEmpty() &&
+            sanitized.imageItems.isEmpty()
+        ) {
+            throw IOException("Bu sayfada güvenli ve indirilebilir medya bulunamadı.")
         }
+        return@withContext sanitized
+    }
+
+    /**
+     * Harici JSON/HTML yanıtlarından ayıklanan tüm ikincil URL'lerin (görsel, kapak, video, ses)
+     * yalnızca herkese açık güvenli adresler olduğunu garanti eder (Coil & SSRF koruması).
+     */
+    private fun sanitizeExtractedMedia(media: ExtractedMedia): ExtractedMedia {
+        val safeImages = media.imageItems.filter { NetworkSecurityGuard.isSafePublicUrl(it.url) }
+        val safeVideos = media.videoFormats.filter { option ->
+            option.directUrl == null || NetworkSecurityGuard.isSafePublicUrl(option.directUrl)
+        }
+        val safeAudios = media.audioFormats.filter { option ->
+            option.directUrl == null || NetworkSecurityGuard.isSafePublicUrl(option.directUrl)
+        }
+        val safeThumb = media.thumbnailUrl?.takeIf { NetworkSecurityGuard.isSafePublicUrl(it) }
+            ?: safeImages.firstOrNull()?.url
+
+        return media.copy(
+            thumbnailUrl = safeThumb,
+            videoFormats = safeVideos,
+            audioFormats = safeAudios,
+            imageItems = safeImages
+        )
     }
 
     /**
@@ -54,55 +90,69 @@ class SocialImageExtractor(
         targetFile: File,
         onProgress: (progress: Float, speedText: String?) -> Unit
     ): File = withContext(Dispatchers.IO) {
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url)
+            ?: throw IllegalArgumentException("Geçersiz veya güvensiz dosya bağlantısı.")
         targetFile.parentFile?.mkdirs()
 
         val request = Request.Builder()
-            .url(url)
+            .url(safeUrl)
             .header("User-Agent", DESKTOP_USER_AGENT)
             .header("Accept", "*/*")
             .build()
 
-        okHttpClient.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Dosya indirilemedi (HTTP ${response.code}).")
-            }
-
-            val body = response.body ?: throw IOException("Sunucu boş yanıt döndürdü.")
-            val totalBytes = body.contentLength()
-            val buffer = ByteArray(16 * 1024)
-            var downloadedBytes = 0L
-            var lastEmitTime = System.currentTimeMillis()
-            var lastBytesSnapshot = 0L
-
-            body.byteStream().use { input ->
-                targetFile.outputStream().use { output ->
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val read = input.read(buffer)
-                        if (read == -1) break
-                        output.write(buffer, 0, read)
-                        downloadedBytes += read
-
-                        val now = System.currentTimeMillis()
-                        val elapsedMs = now - lastEmitTime
-                        if (elapsedMs >= 250L) {
-                            val bytesDelta = downloadedBytes - lastBytesSnapshot
-                            val speedBytesPerSec = (bytesDelta * 1000.0) / elapsedMs.coerceAtLeast(1L)
-                            val speedText = formatSpeed(speedBytesPerSec)
-                            val percent = if (totalBytes > 0L) {
-                                ((downloadedBytes.toFloat() / totalBytes.toFloat()) * 100f).coerceIn(0f, 100f)
-                            } else {
-                                0f
-                            }
-                            onProgress(percent, speedText)
-                            lastEmitTime = now
-                            lastBytesSnapshot = downloadedBytes
-                        }
-                    }
-                    output.flush()
+        try {
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IOException("Dosya indirilemedi (HTTP ${response.code}).")
                 }
+
+                val body = response.body ?: throw IOException("Sunucu boş yanıt döndürdü.")
+                val totalBytes = body.contentLength()
+                if (totalBytes > MAX_DIRECT_DOWNLOAD_BYTES) {
+                    throw IOException("Dosya güvenlik boyut sınırını (500 MB) aşıyor.")
+                }
+
+                val buffer = ByteArray(16 * 1024)
+                var downloadedBytes = 0L
+                var lastEmitTime = System.currentTimeMillis()
+                var lastBytesSnapshot = 0L
+
+                body.byteStream().use { input ->
+                    targetFile.outputStream().use { output ->
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val read = input.read(buffer)
+                            if (read == -1) break
+                            downloadedBytes += read
+                            if (downloadedBytes > MAX_DIRECT_DOWNLOAD_BYTES) {
+                                throw IOException("İndirme güvenlik boyut sınırını (500 MB) aştı.")
+                            }
+                            output.write(buffer, 0, read)
+
+                            val now = System.currentTimeMillis()
+                            val elapsedMs = now - lastEmitTime
+                            if (elapsedMs >= 250L) {
+                                val bytesDelta = downloadedBytes - lastBytesSnapshot
+                                val speedBytesPerSec = (bytesDelta * 1000.0) / elapsedMs.coerceAtLeast(1L)
+                                val speedText = formatSpeed(speedBytesPerSec)
+                                val percent = if (totalBytes > 0L) {
+                                    ((downloadedBytes.toFloat() / totalBytes.toFloat()) * 100f).coerceIn(0f, 100f)
+                                } else {
+                                    0f
+                                }
+                                onProgress(percent, speedText)
+                                lastEmitTime = now
+                                lastBytesSnapshot = downloadedBytes
+                            }
+                        }
+                        output.flush()
+                    }
+                }
+                onProgress(100f, null)
             }
-            onProgress(100f, null)
+        } catch (e: Exception) {
+            runCatching { targetFile.delete() }
+            throw e
         }
 
         targetFile
@@ -581,9 +631,10 @@ class SocialImageExtractor(
     }
 
     private fun isImageContentType(url: String): Boolean {
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url) ?: return false
         return runCatching {
             val headRequest = Request.Builder()
-                .url(url)
+                .url(safeUrl)
                 .head()
                 .header("User-Agent", DESKTOP_USER_AGENT)
                 .build()
@@ -595,8 +646,11 @@ class SocialImageExtractor(
     }
 
     private fun executeGet(url: String, userAgent: String = DESKTOP_USER_AGENT): String {
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url)
+            ?: throw IllegalArgumentException("Geçersiz veya güvensiz bağlantı.")
+
         val request = Request.Builder()
-            .url(url)
+            .url(safeUrl)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json, text/html;q=0.9, */*;q=0.8")
             .header("Accept-Language", "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7")
@@ -606,7 +660,27 @@ class SocialImageExtractor(
             if (!response.isSuccessful) {
                 throw IOException("İstek başarısız oldu (HTTP ${response.code}).")
             }
-            return response.body?.string() ?: throw IOException("Boş sunucu yanıtı.")
+            val body = response.body ?: throw IOException("Boş sunucu yanıtı.")
+            val contentLength = body.contentLength()
+            if (contentLength > MAX_TEXT_RESPONSE_BYTES) {
+                throw IOException("Sunucu yanıtı çok büyük.")
+            }
+
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8 * 1024)
+            var totalRead = 0L
+            body.byteStream().use { input ->
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read == -1) break
+                    totalRead += read
+                    if (totalRead > MAX_TEXT_RESPONSE_BYTES) {
+                        throw IOException("Sunucu yanıtı güvenlik boyut sınırını (5 MB) aştı.")
+                    }
+                    output.write(buffer, 0, read)
+                }
+            }
+            return output.toString(Charsets.UTF_8.name())
         }
     }
 
@@ -686,6 +760,8 @@ class SocialImageExtractor(
     }
 
     companion object {
+        private const val MAX_TEXT_RESPONSE_BYTES = 5L * 1024 * 1024
+        private const val MAX_DIRECT_DOWNLOAD_BYTES = 500L * 1024 * 1024
         private const val MAX_WEB_IMAGES = 12
         private const val REDDIT_USER_AGENT = "UlgenTube/1.0 (Android)"
         private const val DESKTOP_USER_AGENT =

@@ -126,6 +126,7 @@ interface DownloadDao {
             etaSeconds = :etaSeconds,
             status = :status
         WHERE id = :id
+          AND status IN ('QUEUED', 'DOWNLOADING', 'MERGING')
         """
     )
     suspend fun updateProgress(
@@ -177,6 +178,12 @@ abstract class UlgenTubeDatabase : RoomDatabase() {
     companion object {
         private const val DATABASE_NAME = "ulgentube_downloads.db"
 
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE downloads ADD COLUMN transcodeTargetHeight INTEGER DEFAULT NULL")
+            }
+        }
+
         @Volatile
         private var INSTANCE: UlgenTubeDatabase? = null
 
@@ -187,7 +194,7 @@ abstract class UlgenTubeDatabase : RoomDatabase() {
                     UlgenTubeDatabase::class.java,
                     DATABASE_NAME
                 )
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_1_2)
                     .build()
                     .also { INSTANCE = it }
             }

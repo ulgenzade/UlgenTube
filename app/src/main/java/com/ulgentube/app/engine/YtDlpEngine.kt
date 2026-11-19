@@ -36,10 +36,14 @@ class YtDlpEngine(
         url: String,
         platform: PlatformType
     ): ExtractedMedia = withContext(Dispatchers.IO) {
-        val request = YoutubeDLRequest(url).apply {
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url)
+            ?: throw IllegalArgumentException("Geçerli ve güvenli bir bağlantı bulunamadı.")
+
+        val request = YoutubeDLRequest(safeUrl).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
             addOption("--skip-download")
+            addOption("--proto", "http,https")
             addOption("--socket-timeout", "20")
         }
 
@@ -48,7 +52,8 @@ class YtDlpEngine(
         val title = info.title?.takeIf { it.isNotBlank() } ?: "Başlıksız Medya"
         val author = info.uploader?.takeIf { it.isNotBlank() }
         val durationSeconds = info.duration.takeIf { it > 0 }?.toLong()
-        val thumbnailUrl = info.thumbnail?.takeIf { it.isNotBlank() }
+        val thumbnailUrl = info.thumbnail
+            ?.takeIf { it.isNotBlank() && com.ulgentube.app.util.NetworkSecurityGuard.isSafePublicUrl(it) }
 
         val rawFormats = info.formats.orEmpty()
         val videoFormats = buildRealVideoFormats(rawFormats, platform)
@@ -68,7 +73,7 @@ class YtDlpEngine(
         }
 
         ExtractedMedia(
-            originalUrl = url,
+            originalUrl = safeUrl,
             title = title,
             author = author,
             durationSeconds = durationSeconds,
@@ -94,12 +99,15 @@ class YtDlpEngine(
         }
 
         val outputTemplate = File(outputDir, "media.%(ext)s").absolutePath
-        val sourceUrl = task.directUrl?.takeIf { it.isNotBlank() } ?: task.url
+        val rawSourceUrl = task.directUrl?.takeIf { it.isNotBlank() } ?: task.url
+        val sourceUrl = UrlSanitizer.extractFirstValidUrl(rawSourceUrl)
+            ?: throw IllegalArgumentException("Geçersiz veya güvensiz indirme bağlantısı.")
 
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--newline")
+            addOption("--proto", "http,https")
             addOption("-o", outputTemplate)
 
             if (task.isAudioExtraction || task.category == MediaCategory.AUDIO) {
@@ -108,7 +116,8 @@ class YtDlpEngine(
                 val audioQuality = resolveAudioQuality(task.formatLabel)
 
                 if (task.directUrl.isNullOrBlank()) {
-                    addOption("-f", task.ytDlpFormatSelector ?: "bestaudio/best")
+                    val safeSelector = sanitizeFormatSelector(task.ytDlpFormatSelector, "bestaudio/best")
+                    addOption("-f", safeSelector)
                 }
                 addOption("-x")
                 addOption("--audio-format", targetAudioFormat)
@@ -122,11 +131,12 @@ class YtDlpEngine(
                 }
             } else {
                 if (task.directUrl.isNullOrBlank() && !task.ytDlpFormatSelector.isNullOrBlank()) {
-                    addOption("-f", task.ytDlpFormatSelector)
+                    val safeSelector = sanitizeFormatSelector(task.ytDlpFormatSelector, "bestvideo+bestaudio/best")
+                    addOption("-f", safeSelector)
                 }
 
-                val targetHeight = task.transcodeTargetHeight
-                if (targetHeight != null && targetHeight > 0) {
+                val targetHeight = task.transcodeTargetHeight?.takeIf { it in ALLOWED_TRANSCODE_HEIGHTS }
+                if (targetHeight != null) {
                     addOption("--recode-video", "mp4")
                     addOption(
                         "--postprocessor-args",
@@ -296,9 +306,10 @@ class YtDlpEngine(
                     .thenByDescending { it.second.tbr }
             )
 
-        val options = groupedBest.map { (key, stream) ->
+        val options = groupedBest.mapNotNull { (key, stream) ->
             val fmt = stream.format
-            val formatId = fmt.formatId.orEmpty()
+            val formatId = fmt.formatId?.trim().orEmpty()
+            if (!SAFE_FORMAT_ID_REGEX.matches(formatId)) return@mapNotNull null
             val videoSize = resolveSize(fmt)
             val totalSize = when {
                 videoSize == null -> null
@@ -488,9 +499,24 @@ class YtDlpEngine(
         val tbr: Double
     )
 
+    private fun sanitizeFormatSelector(selector: String?, fallback: String): String {
+        val candidate = selector?.trim().orEmpty()
+        return if (candidate.isNotBlank() &&
+            !candidate.startsWith("-") &&
+            SAFE_FORMAT_SELECTOR_REGEX.matches(candidate)
+        ) {
+            candidate
+        } else {
+            fallback
+        }
+    }
+
     companion object {
         private const val HIGH_BITRATE_MULTIPLIER = 1.6
 
+        private val SAFE_FORMAT_ID_REGEX = Regex("""^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$""")
+        private val SAFE_FORMAT_SELECTOR_REGEX = Regex("""^[a-zA-Z0-9._+\-/\[\]=]{1,200}$""")
+        private val ALLOWED_TRANSCODE_HEIGHTS = setOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
         private val SPEED_REGEX = Regex("""\b\d+(?:\.\d+)?\s*[KMG]i?B/s\b""", RegexOption.IGNORE_CASE)
         private val SUPPORTED_AUDIO_FORMATS = setOf("mp3", "m4a", "opus", "flac", "wav")
         private val HDR_KEYWORDS = listOf("hdr", "10bit", "10-bit", "premium", "enhanced", "high")

@@ -50,7 +50,10 @@ object UrlSanitizer {
                 val uri = URI(candidate)
                 val scheme = uri.scheme?.lowercase(Locale.ROOT)
                 val host = uri.host
-                if ((scheme == "http" || scheme == "https") && !host.isNullOrBlank()) {
+                if ((scheme == "http" || scheme == "https") &&
+                    !host.isNullOrBlank() &&
+                    NetworkSecurityGuard.isSafePublicHost(host)
+                ) {
                     candidate
                 } else {
                     null

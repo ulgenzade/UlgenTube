@@ -170,17 +170,22 @@ class DownloadRepository(
     fun isTaskRunning(taskId: String): Boolean = activeJobs[taskId]?.isActive == true
 
     /**
-     * Aktif iş haritasına bir görev kaydeder.
+     * Aktif iş haritasına bir görevi atomik olarak kaydeder.
+     * Aynı görev zaten çalışıyorsa `false` döner (çift başlatmayı önler).
      */
-    fun registerActiveJob(taskId: String, job: Job) {
-        activeJobs[taskId] = job
+    fun tryRegisterActiveJob(taskId: String, job: Job): Boolean {
+        return activeJobs.putIfAbsent(taskId, job) == null
     }
 
     /**
-     * Tamamlanan veya sonlanan işi aktif haritadan çıkarır.
+     * Tamamlanan veya sonlanan işi yalnızca beklenen [job] ile eşleşiyorsa aktif haritadan çıkarır.
      */
-    fun unregisterActiveJob(taskId: String) {
-        activeJobs.remove(taskId)
+    fun unregisterActiveJob(taskId: String, job: Job? = null) {
+        if (job == null) {
+            activeJobs.remove(taskId)
+        } else {
+            activeJobs.remove(taskId, job)
+        }
     }
 
     /**
@@ -254,7 +259,14 @@ class DownloadRepository(
         task: DownloadTask,
         onProgressUpdate: (progress: Float, speedText: String?, status: DownloadStatus) -> Unit
     ): Result<DownloadTask> = withContext(Dispatchers.IO) {
-        val tempDir = File(context.cacheDir, "dl_work/${task.id}")
+        val safeTaskId = task.id.takeIf { SAFE_TASK_ID_REGEX.matches(it) }
+            ?: return@withContext Result.failure(IllegalArgumentException("Geçersiz görev kimliği."))
+        val workRoot = File(context.cacheDir, "dl_work").apply { mkdirs() }
+        val tempDir = File(workRoot, safeTaskId)
+        val canonicalWorkRoot = workRoot.canonicalPath + File.separator
+        if (!tempDir.canonicalPath.startsWith(canonicalWorkRoot)) {
+            return@withContext Result.failure(SecurityException("Geçersiz çalışma dizini."))
+        }
         if (tempDir.exists()) {
             tempDir.deleteRecursively()
         }
@@ -278,7 +290,14 @@ class DownloadRepository(
                 task.transcodeTargetHeight != null
 
             val downloadedFile: File = if (!task.directUrl.isNullOrBlank() && !requiresYtDlpOrFfmpeg) {
-                val targetFile = File(tempDir, task.fileName)
+                val safeFileName = FileNameSanitizer.buildFileName(
+                    rawTitle = task.fileName.substringBeforeLast('.', task.fileName),
+                    extension = task.fileName.substringAfterLast('.', task.targetExtension)
+                )
+                val targetFile = File(tempDir, safeFileName)
+                if (!targetFile.canonicalPath.startsWith(tempDir.canonicalPath + File.separator)) {
+                    throw SecurityException("Geçersiz hedef dosya yolu.")
+                }
                 socialImageExtractor.downloadDirectFile(
                     url = task.directUrl,
                     targetFile = targetFile
@@ -361,9 +380,10 @@ class DownloadRepository(
             )
             throw cancel
         } catch (e: Exception) {
-            val friendlyMessage = e.localizedMessage
-                ?.takeIf { it.isNotBlank() }
-                ?: "İndirme sırasında beklenmeyen bir hata oluştu."
+            val friendlyMessage = com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(
+                throwable = e,
+                fallback = "İndirme sırasında beklenmeyen bir hata oluştu."
+            )
             downloadDao.updateStatus(
                 id = task.id,
                 status = DownloadStatus.FAILED.name,
@@ -412,5 +432,6 @@ class DownloadRepository(
 
     companion object {
         private const val PROGRESS_DB_THROTTLE_MS = 400L
+        private val SAFE_TASK_ID_REGEX = Regex("""^[a-zA-Z0-9_-]{1,64}$""")
     }
 }

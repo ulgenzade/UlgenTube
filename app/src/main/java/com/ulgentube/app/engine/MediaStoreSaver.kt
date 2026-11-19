@@ -140,10 +140,15 @@ class MediaStoreSaver(private val context: Context) {
         }
 
         val targetFile = uniqueTargetFile(targetDir, fileName)
-        sourceFile.inputStream().use { input ->
-            targetFile.outputStream().use { output ->
-                input.copyTo(output, bufferSize = DEFAULT_BUFFER_SIZE * 4)
+        try {
+            sourceFile.inputStream().use { input ->
+                targetFile.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = DEFAULT_BUFFER_SIZE * 4)
+                }
             }
+        } catch (e: Exception) {
+            runCatching { targetFile.delete() }
+            throw e
         }
 
         MediaScannerConnection.scanFile(

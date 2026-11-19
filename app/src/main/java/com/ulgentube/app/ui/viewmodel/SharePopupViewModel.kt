@@ -11,8 +11,11 @@ import com.ulgentube.app.domain.model.ExtractedMedia
 import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaFormatOption
 import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.util.ErrorMessageSanitizer
 import com.ulgentube.app.util.UrlSanitizer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -69,9 +72,10 @@ class SharePopupViewModel(
                 onSuccess = { media -> AnalyzeUiState.Success(media) },
                 onFailure = { error ->
                     AnalyzeUiState.Error(
-                        message = error.localizedMessage
-                            ?.takeIf { it.isNotBlank() }
-                            ?: "Bağlantı analiz edilemedi. Lütfen tekrar deneyin.",
+                        message = ErrorMessageSanitizer.sanitize(
+                            throwable = error,
+                            fallback = "Bağlantı analiz edilemedi. Lütfen tekrar deneyin."
+                        ),
                         originalInput = cleanUrl
                     )
                 }
@@ -85,9 +89,9 @@ class SharePopupViewModel(
         onStarted: () -> Unit = {}
     ) {
         container.applicationScope.launch {
-            container.downloadRepository.enqueue(media, option)
+            runCatching { container.downloadRepository.enqueue(media, option) }
+            withContext(Dispatchers.Main) { onStarted() }
         }
-        onStarted()
     }
 
     fun startImageDownload(
@@ -96,9 +100,9 @@ class SharePopupViewModel(
         onStarted: () -> Unit = {}
     ) {
         container.applicationScope.launch {
-            container.downloadRepository.enqueueImage(media, image)
+            runCatching { container.downloadRepository.enqueueImage(media, image) }
+            withContext(Dispatchers.Main) { onStarted() }
         }
-        onStarted()
     }
 
     fun startAllImagesDownload(
@@ -106,9 +110,9 @@ class SharePopupViewModel(
         onStarted: () -> Unit = {}
     ) {
         container.applicationScope.launch {
-            container.downloadRepository.enqueueAllImages(media)
+            runCatching { container.downloadRepository.enqueueAllImages(media) }
+            withContext(Dispatchers.Main) { onStarted() }
         }
-        onStarted()
     }
 
     private suspend fun waitForEngineIfInitializing() {

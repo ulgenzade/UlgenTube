@@ -9,6 +9,7 @@ import com.ulgentube.app.engine.HybridMediaExtractor
 import com.ulgentube.app.engine.MediaStoreSaver
 import com.ulgentube.app.engine.SocialImageExtractor
 import com.ulgentube.app.engine.YtDlpEngine
+import com.ulgentube.app.util.NetworkSecurityGuard
 import kotlinx.coroutines.CoroutineScope
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
@@ -41,6 +42,7 @@ class DefaultAppContainer(
 
     override val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .dns(NetworkSecurityGuard.SafePublicDns)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)

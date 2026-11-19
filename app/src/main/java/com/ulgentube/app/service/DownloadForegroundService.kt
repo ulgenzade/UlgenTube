@@ -19,6 +19,7 @@ import com.ulgentube.app.domain.model.DownloadStatus
 import com.ulgentube.app.domain.model.DownloadTask
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -27,6 +28,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Arka planda en fazla 3 eşzamanlı indirmeyi yöneten Ön Plan Servisi (Foreground Service).
@@ -40,6 +42,8 @@ class DownloadForegroundService : Service() {
     private val activeProgressMap = ConcurrentHashMap<String, ActiveNotificationState>()
     private val completedCountInSession = AtomicInteger(0)
     private val lastCompletedTitle = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val lastStartId = AtomicInteger(-1)
+    private val lastNotificationUpdateMs = AtomicLong(0L)
 
     private val repository: DownloadRepository
         get() = (application as UlgenTubeApp).container.downloadRepository
@@ -47,6 +51,7 @@ class DownloadForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId.set(startId)
         when (intent?.action) {
             ACTION_CANCEL_TASK -> {
                 val taskId = intent.getStringExtra(EXTRA_TASK_ID)
@@ -93,7 +98,8 @@ class DownloadForegroundService : Service() {
     }
 
     private fun launchDownloadJob(task: DownloadTask) {
-        val job = serviceScope.launch {
+        lateinit var job: kotlinx.coroutines.Job
+        job = serviceScope.launch(start = CoroutineStart.LAZY) {
             activeProgressMap[task.id] = ActiveNotificationState(
                 taskId = task.id,
                 title = task.title,
@@ -101,11 +107,12 @@ class DownloadForegroundService : Service() {
                 speedText = null,
                 status = DownloadStatus.QUEUED
             )
-            updateProgressNotification()
+            updateProgressNotification(force = true)
 
             try {
                 concurrencySemaphore.withPermit {
                     val result = repository.executeDownload(task) { progress, speedText, status ->
+                        val prevStatus = activeProgressMap[task.id]?.status
                         activeProgressMap[task.id] = ActiveNotificationState(
                             taskId = task.id,
                             title = task.title,
@@ -113,7 +120,7 @@ class DownloadForegroundService : Service() {
                             speedText = speedText,
                             status = status
                         )
-                        updateProgressNotification()
+                        updateProgressNotification(force = prevStatus != status)
                     }
 
                     if (result.isSuccess) {
@@ -125,12 +132,16 @@ class DownloadForegroundService : Service() {
                 // İptal durumu repository tarafında güncellendi
             } finally {
                 activeProgressMap.remove(task.id)
-                repository.unregisterActiveJob(task.id)
+                repository.unregisterActiveJob(task.id, job)
                 refreshProgressNotificationOrStop()
             }
         }
 
-        repository.registerActiveJob(task.id, job)
+        if (repository.tryRegisterActiveJob(task.id, job)) {
+            job.start()
+        } else {
+            job.cancel()
+        }
     }
 
     private suspend fun refreshProgressNotificationOrStop() {
@@ -178,9 +189,15 @@ class DownloadForegroundService : Service() {
             .build()
     }
 
-    private fun updateProgressNotification() {
+    private fun updateProgressNotification(force: Boolean = false) {
         val activeList = activeProgressMap.values.toList()
         if (activeList.isEmpty()) return
+
+        val now = System.currentTimeMillis()
+        if (!force && now - lastNotificationUpdateMs.get() < NOTIFICATION_THROTTLE_MS) {
+            return
+        }
+        lastNotificationUpdateMs.set(now)
 
         val single = activeList.size == 1
         val title: String
@@ -286,9 +303,23 @@ class DownloadForegroundService : Service() {
         }
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        activeProgressMap.clear()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
+        (application as? UlgenTubeApp)?.applicationScope?.launch {
+            runCatching { repository.cancelAllActive() }
+        }
+    }
+
     private fun stopServiceGracefully() {
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        val id = lastStartId.get()
+        if (id > 0) {
+            stopSelf(id)
+        } else {
+            stopSelf()
+        }
     }
 
     override fun onDestroy() {
@@ -306,6 +337,7 @@ class DownloadForegroundService : Service() {
 
     companion object {
         private const val MAX_CONCURRENT_DOWNLOADS = 3
+        private const val NOTIFICATION_THROTTLE_MS = 500L
         private const val NOTIFICATION_ID_PROGRESS = 2001
         private const val NOTIFICATION_ID_COMPLETED = 2002
         private const val REQUEST_CODE_OPEN_APP = 1001
@@ -320,7 +352,9 @@ class DownloadForegroundService : Service() {
             val intent = Intent(context.applicationContext, DownloadForegroundService::class.java).apply {
                 action = ACTION_START
             }
-            ContextCompat.startForegroundService(context.applicationContext, intent)
+            runCatching {
+                ContextCompat.startForegroundService(context.applicationContext, intent)
+            }
         }
     }
 }

@@ -1,26 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
-    <!-- Uygulama içi önbellek ve dosyalar -->
-    <cache-path
-        name="cache"
-        path="." />
-    <files-path
-        name="files"
-        path="." />
-    <!-- Harici uygulama dosyaları ve genel İndirilenler / Filmler / Müzik klasörleri -->
-    <external-files-path
-        name="external_files"
-        path="." />
-    <external-path
-        name="external_downloads"
-        path="Download/" />
+    <!-- Yalnızca UlgenTube tarafından kaydedilen ortak medya klasörleri -->
     <external-path
         name="external_movies"
-        path="Movies/" />
+        path="Movies/UlgenTube/" />
     <external-path
         name="external_music"
-        path="Music/" />
+        path="Music/UlgenTube/" />
     <external-path
         name="external_pictures"
-        path="Pictures/" />
+        path="Pictures/UlgenTube/" />
 </paths>

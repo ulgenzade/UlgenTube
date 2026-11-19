@@ -110,9 +110,10 @@ class HybridMediaExtractor(
         val ytError = ytResult.exceptionOrNull()
         val imgError = imageFallback.exceptionOrNull()
         throw IllegalStateException(
-            ytError?.localizedMessage
-                ?: imgError?.localizedMessage
-                ?: "Bağlantı analiz edilemedi."
+            com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(
+                throwable = ytError ?: imgError,
+                fallback = "Bağlantı analiz edilemedi."
+            )
         )
     }
 

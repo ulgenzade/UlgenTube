@@ -297,7 +297,7 @@ private fun resolveTaskUri(context: Context, task: DownloadTask): Uri? {
                     val filePath = parsed.path?.takeIf { it.isNotBlank() }
                     if (filePath != null) {
                         val file = File(filePath)
-                        if (file.exists()) {
+                        if (file.exists() && isWithinAllowedMediaDirs(file)) {
                             return runCatching {
                                 FileProvider.getUriForFile(
                                     context,
@@ -317,7 +317,7 @@ private fun resolveTaskUri(context: Context, task: DownloadTask): Uri? {
 
     val rawPath = task.savedPath?.takeIf { it.isNotBlank() } ?: return null
     val file = File(rawPath)
-    if (!file.exists()) return null
+    if (!file.exists() || !isWithinAllowedMediaDirs(file)) return null
 
     return runCatching {
         FileProvider.getUriForFile(
@@ -326,6 +326,22 @@ private fun resolveTaskUri(context: Context, task: DownloadTask): Uri? {
             file
         )
     }.getOrNull()
+}
+
+@Suppress("DEPRECATION")
+private fun isWithinAllowedMediaDirs(file: File): Boolean {
+    val canonicalFilePath = runCatching { file.canonicalPath }.getOrNull() ?: return false
+    val allowedDirs = listOf(
+        android.os.Environment.DIRECTORY_MOVIES,
+        android.os.Environment.DIRECTORY_MUSIC,
+        android.os.Environment.DIRECTORY_PICTURES
+    ).mapNotNull { dirType ->
+        runCatching {
+            File(android.os.Environment.getExternalStoragePublicDirectory(dirType), "UlgenTube")
+                .canonicalPath + File.separator
+        }.getOrNull()
+    }
+    return allowedDirs.any { canonicalFilePath.startsWith(it) }
 }
 
 private fun resolveMimeType(category: MediaCategory): String = when (category) {

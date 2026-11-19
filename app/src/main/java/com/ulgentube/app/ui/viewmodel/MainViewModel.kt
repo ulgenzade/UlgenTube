@@ -103,9 +103,10 @@ class MainViewModel(
                 onSuccess = { media -> AnalyzeUiState.Success(media) },
                 onFailure = { error ->
                     AnalyzeUiState.Error(
-                        message = error.localizedMessage
-                            ?.takeIf { it.isNotBlank() }
-                            ?: "Bağlantı analiz edilemedi. Bağlantının herkese açık olduğundan emin olun.",
+                        message = com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(
+                            throwable = error,
+                            fallback = "Bağlantı analiz edilemedi. Bağlantının herkese açık olduğundan emin olun."
+                        ),
                         originalInput = cleanUrl
                     )
                 }
@@ -221,7 +222,9 @@ class MainViewModel(
             _ytDlpUpdateState.value = result.fold(
                 onSuccess = { message -> message },
                 onFailure = { error ->
-                    "Güncelleme başarısız: ${error.localizedMessage ?: "Bilinmeyen hata"}"
+                    "Güncelleme başarısız: ${
+                        com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(error, "Bilinmeyen hata")
+                    }"
                 }
             )
             _isUpdatingYtDlp.value = false

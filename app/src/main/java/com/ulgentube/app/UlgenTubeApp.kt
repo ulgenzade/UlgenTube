@@ -5,8 +5,11 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import android.util.Log
+import coil.ImageLoader
+import coil.ImageLoaderFactory
 import com.ulgentube.app.di.AppContainer
 import com.ulgentube.app.di.DefaultAppContainer
+import com.ulgentube.app.util.ErrorMessageSanitizer
 import com.yausername.aria2c.Aria2c
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
@@ -50,7 +53,7 @@ sealed interface EngineInitState {
  * - ANR oluşmaması için YoutubeDL, FFmpeg ve Aria2c başlatma işlemlerini
  *   [Dispatchers.IO] üzerinde arka planda güvenli şekilde yürütür.
  */
-class UlgenTubeApp : Application() {
+class UlgenTubeApp : Application(), ImageLoaderFactory {
 
     /** Uygulama ömrü boyunca yaşayan arka plan Coroutine kapsamı. */
     val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -76,6 +79,34 @@ class UlgenTubeApp : Application() {
             }
         )
         initializeEngines()
+        cleanupOrphanedWorkDir()
+    }
+
+    override fun newImageLoader(): ImageLoader {
+        return ImageLoader.Builder(this)
+            .okHttpClient { container.okHttpClient }
+            .crossfade(true)
+            .build()
+    }
+
+    /**
+     * Önceki oturumda sistem tarafından sonlandırılan indirmelerden kalan yetim geçici klasörleri temizler.
+     * Soğuk başlangıçta yeni başlayan aktif görevlerin klasörlerine kesinlikle dokunmaz.
+     */
+    private fun cleanupOrphanedWorkDir() {
+        applicationScope.launch {
+            runCatching {
+                val workDir = java.io.File(cacheDir, "dl_work")
+                val now = System.currentTimeMillis()
+                workDir.listFiles()?.forEach { child ->
+                    val isRunning = container.downloadRepository.isTaskRunning(child.name)
+                    val isStale = (now - child.lastModified()) > ORPHAN_WORK_DIR_GRACE_MS
+                    if (!isRunning && isStale) {
+                        child.deleteRecursively()
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -129,7 +160,7 @@ class UlgenTubeApp : Application() {
                 val error = ytDlResult.exceptionOrNull()
                 Log.e(TAG, "YoutubeDL başlatılamadı", error)
                 _engineInitState.value = EngineInitState.Error(
-                    message = error?.localizedMessage ?: "İndirme motoru başlatılamadı.",
+                    message = ErrorMessageSanitizer.sanitize(error, "İndirme motoru başlatılamadı."),
                     throwable = error
                 )
                 return@launch
@@ -163,6 +194,7 @@ class UlgenTubeApp : Application() {
 
     companion object {
         private const val TAG = "UlgenTubeApp"
+        private const val ORPHAN_WORK_DIR_GRACE_MS = 30_000L
 
         const val CHANNEL_DOWNLOADS_PROGRESS = "downloads_channel"
         const val CHANNEL_DOWNLOADS_DONE = "downloads_done_channel"
