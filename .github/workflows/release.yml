@@ -37,7 +37,7 @@ jobs:
 
       - name: APK Dosyalarını Sürüm Adıyla Hazırla
         run: |
-          TAG_NAME="${GITHUB_REF_NAME:-v2.0.0}"
+          TAG_NAME="${GITHUB_REF_NAME:-v1.0}"
           mkdir -p release-apks
           for apk in app/build/outputs/apk/release/*.apk; do
             base=$(basename "$apk")
