@@ -1,4 +1,8 @@
-# UlgenTube
+<p align="center">
+  <img src="assets/ulgentube_logo.png" alt="UlgenTube Logo" width="128" height="128" />
+</p>
+
+<h1 align="center">UlgenTube</h1>
 
 <p align="center">
   <strong>Reklamsız, %100 Ücretsiz, Modern Material 3 Expressive Android Medya İndirici</strong>
