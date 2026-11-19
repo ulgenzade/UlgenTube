@@ -1,6 +1,9 @@
 package com.ulgentube.app.ui.screens
 
+import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,19 +22,31 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.Cookie
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.FastForward
+import androidx.compose.material.icons.rounded.FlashOn
+import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.SystemUpdateAlt
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -48,16 +63,23 @@ import com.ulgentube.app.BuildConfig
 import com.ulgentube.app.domain.model.AppSettings
 import com.ulgentube.app.domain.model.ThemeMode
 import com.ulgentube.app.ui.theme.ElectricPurple
+import com.ulgentube.app.ui.theme.EmeraldSuccess
 import com.ulgentube.app.ui.theme.UlgenPrimaryGradient
 
 private val VIDEO_QUALITY_OPTIONS = listOf("2160p", "1080p", "720p", "480p")
 private val AUDIO_FORMAT_OPTIONS = listOf("mp3", "m4a", "opus", "flac", "wav")
+private val FILE_NAME_TEMPLATE_OPTIONS = listOf(
+    "{title}" to "Sadece Başlık",
+    "{author} - {title}" to "Kanal - Başlık",
+    "{date}_{title}" to "Tarih_Başlık"
+)
 
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
     ytDlpUpdateMessage: String?,
     isUpdatingYtDlp: Boolean,
+    hasCookies: Boolean,
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetDynamicColor: (Boolean) -> Unit,
     onSetDefaultVideoQuality: (String) -> Unit,
@@ -65,11 +87,28 @@ fun SettingsScreen(
     onSetUseAria2c: (Boolean) -> Unit,
     onSetEmbedThumbnail: (Boolean) -> Unit,
     onSetAutoDetectClipboard: (Boolean) -> Unit,
+    onSetSponsorBlockEnabled: (Boolean) -> Unit,
+    onSetEmbedChapters: (Boolean) -> Unit,
+    onSetWifiOnly: (Boolean) -> Unit,
+    onSetZeroFrictionShareMode: (Boolean) -> Unit,
+    onSetPlatformSubfolders: (Boolean) -> Unit,
+    onSetFileNameTemplate: (String) -> Unit,
+    onSetCookiesEnabled: (Boolean) -> Unit,
+    onImportCookies: (Uri) -> Unit,
+    onClearCookies: () -> Unit,
     onUpdateYtDlp: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val supportsDynamicColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
+    val cookieFilePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            onImportCookies(uri)
+        }
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
@@ -84,7 +123,7 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
-                    text = "Görünüm, indirme kalitesi ve motor tercihleri",
+                    text = "Görünüm, akıllı indirme, klasör düzeni ve motor tercihleri",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -155,6 +194,183 @@ fun SettingsScreen(
                             selected = settings.defaultAudioFormat,
                             onSelect = onSetDefaultAudioFormat
                         )
+                    }
+                }
+            }
+        }
+
+        // Akıllı İndirme Kartı
+        item(key = "smart_download_card") {
+            SettingsGroupCard(title = "Akıllı İndirme") {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.FlashOn,
+                        title = "Zero-Friction Anında Sessiz İndir",
+                        subtitle = "Paylaşımda 2.5 sn geri sayımlı mini kapsül ile otomatik indirir",
+                        checked = settings.zeroFrictionShareMode,
+                        onCheckedChange = onSetZeroFrictionShareMode
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.Wifi,
+                        title = "Yalnızca Wi-Fi ile İndir",
+                        subtitle = "Mobil veri harcamasını önlemek için Wi-Fi bağlantısını bekler",
+                        checked = settings.wifiOnly,
+                        onCheckedChange = onSetWifiOnly
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.FastForward,
+                        title = "SponsorBlock (Sponsor/Intro Kes)",
+                        subtitle = "Videolardaki sponsor ve tanıtım bölümlerini otomatik atlar",
+                        checked = settings.sponsorBlockEnabled,
+                        onCheckedChange = onSetSponsorBlockEnabled
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.Bookmarks,
+                        title = "Bölüm İşaretlerini (Chapters) Göm",
+                        subtitle = "Video içi bölüm başlıklarını dosyaya meta veri olarak ekler",
+                        checked = settings.embedChapters,
+                        onCheckedChange = onSetEmbedChapters
+                    )
+                }
+            }
+        }
+
+        // Dosya & Klasör Düzeni Kartı
+        item(key = "file_org_card") {
+            SettingsGroupCard(title = "Dosya & Klasör Düzeni") {
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.FolderCopy,
+                        title = "Platform Bazlı Alt Klasörler",
+                        subtitle = "Movies/UlgenTube/YouTube/ gibi platform klasörlerine ayırır",
+                        checked = settings.platformSubfolders,
+                        onCheckedChange = onSetPlatformSubfolders
+                    )
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Dosya Adı Şablonu",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        FlowOptionRow(
+                            options = FILE_NAME_TEMPLATE_OPTIONS,
+                            selected = settings.fileNameTemplate,
+                            onSelect = onSetFileNameTemplate
+                        )
+                    }
+                }
+            }
+        }
+
+        // Özel İçerik & Çerezler (Cookies) Kartı
+        item(key = "cookies_card") {
+            SettingsGroupCard(
+                title = "Özel İçerik & Çerezler (Cookies)",
+                trailingBadge = {
+                    val statusColor = if (hasCookies) {
+                        EmeraldSuccess
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = statusColor.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.35f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor)
+                            )
+                            Text(
+                                text = if (hasCookies) "Yüklü" else "Yüklü Değil",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = statusColor
+                            )
+                        }
+                    }
+                }
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SettingsSwitchRow(
+                        icon = Icons.Rounded.Cookie,
+                        title = "Çerez Desteği (Cookies)",
+                        subtitle = "Yaş sınırlı veya oturum gerektiren içerikler için cookies.txt kullanır",
+                        checked = settings.cookiesEnabled,
+                        onCheckedChange = onSetCookiesEnabled
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Button(
+                            onClick = { cookieFilePicker.launch(arrayOf("text/plain", "*/*")) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(42.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                            contentPadding = PaddingValues()
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(UlgenPrimaryGradient, RoundedCornerShape(12.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.padding(horizontal = 8.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.UploadFile,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "cookies.txt İçe Aktar",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = onClearCookies,
+                            enabled = hasCookies,
+                            modifier = Modifier.height(42.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.DeleteOutline,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Temizle",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     }
                 }
             }
@@ -311,6 +527,7 @@ fun SettingsScreen(
 @Composable
 private fun SettingsGroupCard(
     title: String,
+    trailingBadge: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
     Surface(
@@ -323,12 +540,19 @@ private fun SettingsGroupCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+                trailingBadge?.invoke()
+            }
             Spacer(modifier = Modifier.height(12.dp))
             content()
         }

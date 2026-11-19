@@ -33,6 +33,13 @@ class SettingsRepository(private val context: Context) {
         val USE_ARIA2C = booleanPreferencesKey("use_aria2c")
         val AUTO_DETECT_CLIPBOARD = booleanPreferencesKey("auto_detect_clipboard")
         val EMBED_THUMBNAIL = booleanPreferencesKey("embed_thumbnail")
+        val SPONSOR_BLOCK_ENABLED = booleanPreferencesKey("sponsor_block_enabled")
+        val EMBED_CHAPTERS = booleanPreferencesKey("embed_chapters")
+        val WIFI_ONLY = booleanPreferencesKey("wifi_only")
+        val ZERO_FRICTION_SHARE_MODE = booleanPreferencesKey("zero_friction_share_mode")
+        val PLATFORM_SUBFOLDERS = booleanPreferencesKey("platform_subfolders")
+        val FILE_NAME_TEMPLATE = stringPreferencesKey("file_name_template")
+        val COOKIES_ENABLED = booleanPreferencesKey("cookies_enabled")
     }
 
     val settingsFlow: Flow<AppSettings> = context.settingsDataStore.data
@@ -53,7 +60,14 @@ class SettingsRepository(private val context: Context) {
                 defaultAudioFormat = prefs[Keys.DEFAULT_AUDIO_FORMAT] ?: "mp3",
                 useAria2c = prefs[Keys.USE_ARIA2C] ?: true,
                 autoDetectClipboard = prefs[Keys.AUTO_DETECT_CLIPBOARD] ?: true,
-                embedThumbnail = prefs[Keys.EMBED_THUMBNAIL] ?: true
+                embedThumbnail = prefs[Keys.EMBED_THUMBNAIL] ?: true,
+                sponsorBlockEnabled = prefs[Keys.SPONSOR_BLOCK_ENABLED] ?: false,
+                embedChapters = prefs[Keys.EMBED_CHAPTERS] ?: true,
+                wifiOnly = prefs[Keys.WIFI_ONLY] ?: false,
+                zeroFrictionShareMode = prefs[Keys.ZERO_FRICTION_SHARE_MODE] ?: false,
+                platformSubfolders = prefs[Keys.PLATFORM_SUBFOLDERS] ?: false,
+                fileNameTemplate = prefs[Keys.FILE_NAME_TEMPLATE] ?: "{title}",
+                cookiesEnabled = prefs[Keys.COOKIES_ENABLED] ?: false
             )
         }
 
@@ -85,5 +99,35 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setEmbedThumbnail(enabled: Boolean) {
         context.settingsDataStore.edit { it[Keys.EMBED_THUMBNAIL] = enabled }
+    }
+
+    suspend fun setSponsorBlockEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.SPONSOR_BLOCK_ENABLED] = enabled }
+    }
+
+    suspend fun setEmbedChapters(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.EMBED_CHAPTERS] = enabled }
+    }
+
+    suspend fun setWifiOnly(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.WIFI_ONLY] = enabled }
+    }
+
+    suspend fun setZeroFrictionShareMode(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.ZERO_FRICTION_SHARE_MODE] = enabled }
+    }
+
+    suspend fun setPlatformSubfolders(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.PLATFORM_SUBFOLDERS] = enabled }
+    }
+
+    suspend fun setFileNameTemplate(template: String) {
+        context.settingsDataStore.edit {
+            it[Keys.FILE_NAME_TEMPLATE] = template.trim().ifBlank { "{title}" }
+        }
+    }
+
+    suspend fun setCookiesEnabled(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.COOKIES_ENABLED] = enabled }
     }
 }

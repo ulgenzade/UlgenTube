@@ -5,10 +5,13 @@ import com.ulgentube.app.data.DownloadRepository
 import com.ulgentube.app.data.local.DownloadDao
 import com.ulgentube.app.data.local.SettingsRepository
 import com.ulgentube.app.data.local.UlgenTubeDatabase
+import com.ulgentube.app.engine.CookieRepository
 import com.ulgentube.app.engine.HybridMediaExtractor
+import com.ulgentube.app.engine.LocalFfmpegProcessor
 import com.ulgentube.app.engine.MediaStoreSaver
 import com.ulgentube.app.engine.SocialImageExtractor
 import com.ulgentube.app.engine.YtDlpEngine
+import com.ulgentube.app.player.MiniAudioPlayerManager
 import com.ulgentube.app.util.NetworkSecurityGuard
 import kotlinx.coroutines.CoroutineScope
 import okhttp3.OkHttpClient
@@ -24,10 +27,13 @@ interface AppContainer {
     val database: UlgenTubeDatabase
     val downloadDao: DownloadDao
     val settingsRepository: SettingsRepository
+    val cookieRepository: CookieRepository
     val ytDlpEngine: YtDlpEngine
     val socialImageExtractor: SocialImageExtractor
     val hybridMediaExtractor: HybridMediaExtractor
     val mediaStoreSaver: MediaStoreSaver
+    val localFfmpegProcessor: LocalFfmpegProcessor
+    val miniAudioPlayerManager: MiniAudioPlayerManager
     val downloadRepository: DownloadRepository
 }
 
@@ -63,8 +69,15 @@ class DefaultAppContainer(
         SettingsRepository(applicationContext)
     }
 
+    override val cookieRepository: CookieRepository by lazy {
+        CookieRepository(applicationContext)
+    }
+
     override val ytDlpEngine: YtDlpEngine by lazy {
-        YtDlpEngine(isAria2cReady = isAria2cReady)
+        YtDlpEngine(
+            isAria2cReady = isAria2cReady,
+            cookieRepository = cookieRepository
+        )
     }
 
     override val socialImageExtractor: SocialImageExtractor by lazy {
@@ -80,6 +93,17 @@ class DefaultAppContainer(
 
     override val mediaStoreSaver: MediaStoreSaver by lazy {
         MediaStoreSaver(applicationContext)
+    }
+
+    override val localFfmpegProcessor: LocalFfmpegProcessor by lazy {
+        LocalFfmpegProcessor(
+            context = applicationContext,
+            mediaStoreSaver = mediaStoreSaver
+        )
+    }
+
+    override val miniAudioPlayerManager: MiniAudioPlayerManager by lazy {
+        MiniAudioPlayerManager(applicationContext)
     }
 
     override val downloadRepository: DownloadRepository by lazy {

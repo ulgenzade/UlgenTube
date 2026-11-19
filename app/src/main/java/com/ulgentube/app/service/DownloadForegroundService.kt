@@ -6,6 +6,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -15,8 +17,10 @@ import androidx.core.content.ContextCompat
 import com.ulgentube.app.MainActivity
 import com.ulgentube.app.UlgenTubeApp
 import com.ulgentube.app.data.DownloadRepository
+import com.ulgentube.app.data.local.SettingsRepository
 import com.ulgentube.app.domain.model.DownloadStatus
 import com.ulgentube.app.domain.model.DownloadTask
+import com.ulgentube.app.util.MediaUriHelper
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -29,11 +33,13 @@ import kotlinx.coroutines.sync.withPermit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Arka planda en fazla 3 eşzamanlı indirmeyi yöneten Ön Plan Servisi (Foreground Service).
  * Android 14+ (API 34+) için `FOREGROUND_SERVICE_TYPE_DATA_SYNC` tipini kullanır,
- * canlı ilerleme bildirimi ve "İptal" aksiyonu sunar.
+ * Wi-Fi kısıtını denetler, canlı ilerleme bildirimi, "İptal" ve tamamlandı bildiriminde
+ * doğrudan "Aç" / "Paylaş" aksiyonları sunar.
  */
 class DownloadForegroundService : Service() {
 
@@ -41,12 +47,15 @@ class DownloadForegroundService : Service() {
     private val concurrencySemaphore = Semaphore(MAX_CONCURRENT_DOWNLOADS)
     private val activeProgressMap = ConcurrentHashMap<String, ActiveNotificationState>()
     private val completedCountInSession = AtomicInteger(0)
-    private val lastCompletedTitle = java.util.concurrent.atomic.AtomicReference<String?>(null)
+    private val lastCompletedTask = AtomicReference<DownloadTask?>(null)
     private val lastStartId = AtomicInteger(-1)
     private val lastNotificationUpdateMs = AtomicLong(0L)
 
     private val repository: DownloadRepository
         get() = (application as UlgenTubeApp).container.downloadRepository
+
+    private val settingsRepository: SettingsRepository
+        get() = (application as UlgenTubeApp).container.settingsRepository
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -83,6 +92,15 @@ class DownloadForegroundService : Service() {
 
     private fun enqueuePendingTasks() {
         serviceScope.launch {
+            val settings = settingsRepository.getCurrentSettings()
+            if (settings.wifiOnly && !isWifiConnected()) {
+                if (activeProgressMap.isEmpty()) {
+                    showWifiWaitingNotification()
+                    stopServiceGracefully()
+                }
+                return@launch
+            }
+
             val pendingTasks = repository.getPendingTasks()
             if (pendingTasks.isEmpty() && activeProgressMap.isEmpty()) {
                 stopServiceGracefully()
@@ -123,9 +141,9 @@ class DownloadForegroundService : Service() {
                         updateProgressNotification(force = prevStatus != status)
                     }
 
-                    if (result.isSuccess) {
+                    result.getOrNull()?.let { completedTask ->
                         completedCountInSession.incrementAndGet()
-                        lastCompletedTitle.set(task.title)
+                        lastCompletedTask.set(completedTask)
                     }
                 }
             } catch (_: CancellationException) {
@@ -153,18 +171,45 @@ class DownloadForegroundService : Service() {
         // Yeni eklenmiş bekleyen görev var mı tekrar kontrol et
         val remaining = repository.getPendingTasks().filterNot { repository.isTaskRunning(it.id) }
         if (remaining.isNotEmpty()) {
+            val settings = settingsRepository.getCurrentSettings()
+            if (settings.wifiOnly && !isWifiConnected()) {
+                showWifiWaitingNotification()
+                stopServiceGracefully()
+                return
+            }
             remaining.forEach { launchDownloadJob(it) }
             return
         }
 
         val completedTotal = completedCountInSession.getAndSet(0)
+        val completedTask = lastCompletedTask.getAndSet(null)
         if (completedTotal > 0) {
             showCompletionNotification(
                 completedCount = completedTotal,
-                sampleTitle = lastCompletedTitle.getAndSet(null)
+                lastTask = completedTask
             )
         }
         stopServiceGracefully()
+    }
+
+    private fun isWifiConnected(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        val activeNetwork = cm.activeNetwork ?: return false
+        val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    private fun showWifiWaitingNotification() {
+        val notification = NotificationCompat.Builder(this, UlgenTubeApp.CHANNEL_DOWNLOADS_DONE)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setContentTitle("Wi-Fi bekleniyor")
+            .setContentText("Wi-Fi bekleniyor — indirmeler duraklatıldı")
+            .setAutoCancel(true)
+            .setContentIntent(createOpenAppPendingIntent())
+            .build()
+
+        safeNotify(NOTIFICATION_ID_WIFI_WAITING, notification)
     }
 
     private fun promoteToForeground(notification: Notification) {
@@ -265,24 +310,60 @@ class DownloadForegroundService : Service() {
         safeNotify(NOTIFICATION_ID_PROGRESS, notification)
     }
 
-    private fun showCompletionNotification(completedCount: Int, sampleTitle: String?) {
+    private fun showCompletionNotification(completedCount: Int, lastTask: DownloadTask?) {
         val title = if (completedCount == 1) {
             "İndirme tamamlandı"
         } else {
             "$completedCount indirme tamamlandı"
         }
-        val text = sampleTitle?.takeIf { completedCount == 1 }
+        val text = lastTask?.title?.takeIf { completedCount == 1 }
             ?: "Dosyalar cihaz galerisine kaydedildi."
 
-        val notification = NotificationCompat.Builder(this, UlgenTubeApp.CHANNEL_DOWNLOADS_DONE)
+        val builder = NotificationCompat.Builder(this, UlgenTubeApp.CHANNEL_DOWNLOADS_DONE)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle(title)
             .setContentText(text)
             .setAutoCancel(true)
             .setContentIntent(createOpenAppPendingIntent())
-            .build()
 
-        safeNotify(NOTIFICATION_ID_COMPLETED, notification)
+        if (completedCount == 1 && lastTask != null) {
+            val resolvedUri = MediaUriHelper.resolveTaskUri(this, lastTask)
+            if (resolvedUri != null) {
+                val mimeType = MediaUriHelper.resolveMimeType(lastTask.category)
+
+                val openIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(resolvedUri, mimeType)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val openPendingIntent = PendingIntent.getActivity(
+                    this,
+                    REQUEST_CODE_OPEN_MEDIA,
+                    openIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = mimeType
+                    putExtra(Intent.EXTRA_STREAM, resolvedUri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                val shareChooser = Intent.createChooser(sendIntent, "Medyayı Paylaş").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                val sharePendingIntent = PendingIntent.getActivity(
+                    this,
+                    REQUEST_CODE_SHARE_MEDIA,
+                    shareChooser,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                builder
+                    .addAction(android.R.drawable.ic_media_play, "Aç", openPendingIntent)
+                    .addAction(android.R.drawable.ic_menu_share, "Paylaş", sharePendingIntent)
+            }
+        }
+
+        safeNotify(NOTIFICATION_ID_COMPLETED, builder.build())
     }
 
     private fun createOpenAppPendingIntent(): PendingIntent {
@@ -340,8 +421,11 @@ class DownloadForegroundService : Service() {
         private const val NOTIFICATION_THROTTLE_MS = 500L
         private const val NOTIFICATION_ID_PROGRESS = 2001
         private const val NOTIFICATION_ID_COMPLETED = 2002
+        private const val NOTIFICATION_ID_WIFI_WAITING = 2003
         private const val REQUEST_CODE_OPEN_APP = 1001
         private const val REQUEST_CODE_CANCEL = 1002
+        private const val REQUEST_CODE_OPEN_MEDIA = 1003
+        private const val REQUEST_CODE_SHARE_MEDIA = 1004
 
         const val ACTION_START = "com.ulgentube.app.action.START_DOWNLOADS"
         const val ACTION_CANCEL_TASK = "com.ulgentube.app.action.CANCEL_TASK"

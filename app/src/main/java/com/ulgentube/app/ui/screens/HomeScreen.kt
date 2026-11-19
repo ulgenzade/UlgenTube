@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -36,15 +35,17 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Link
-import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -65,7 +66,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
-import com.ulgentube.app.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,9 +74,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.ulgentube.app.EngineInitState
+import com.ulgentube.app.R
 import com.ulgentube.app.domain.model.AppSettings
 import com.ulgentube.app.domain.model.DownloadTask
 import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.player.MiniPlayerState
 import com.ulgentube.app.ui.components.DownloadItemCard
 import com.ulgentube.app.ui.components.PlatformBadge
 import com.ulgentube.app.ui.theme.AmberWarning
@@ -107,14 +109,17 @@ fun HomeScreen(
     downloads: List<DownloadTask>,
     settings: AppSettings,
     engineState: EngineInitState,
+    miniPlayerState: MiniPlayerState,
     onUrlInputChange: (String) -> Unit,
     onClearUrl: () -> Unit,
     onAnalyzeUrl: (String) -> Unit,
+    onBatchDownloadUrls: (List<String>, Boolean) -> Unit,
     onRetryEngineInit: () -> Unit,
     onViewAllDownloads: () -> Unit,
     onCancelDownload: (String) -> Unit,
     onRetryDownload: (String) -> Unit,
-    onDeleteDownload: (String) -> Unit,
+    onDeleteDownload: (String, Boolean) -> Unit,
+    onPlayAudio: (DownloadTask) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -123,6 +128,11 @@ fun HomeScreen(
 
     var detectedClipboardUrl by remember { mutableStateOf<String?>(null) }
     var dismissedClipboardUrl by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteTaskId by remember { mutableStateOf<String?>(null) }
+
+    val extractedBatchUrls = remember(urlInput) {
+        UrlSanitizer.extractAllValidUrls(urlInput)
+    }
 
     fun checkClipboard() {
         if (!settings.autoDetectClipboard) {
@@ -195,6 +205,7 @@ fun HomeScreen(
         item(key = "url_input_card") {
             UrlInputHeroCard(
                 urlInput = urlInput,
+                batchUrls = extractedBatchUrls,
                 onUrlInputChange = onUrlInputChange,
                 onClear = onClearUrl,
                 onPaste = {
@@ -206,6 +217,10 @@ fun HomeScreen(
                 onAnalyze = {
                     keyboardController?.hide()
                     onAnalyzeUrl(urlInput)
+                },
+                onBatchDownload = { audioOnly ->
+                    keyboardController?.hide()
+                    onBatchDownloadUrls(extractedBatchUrls, audioOnly)
                 }
             )
         }
@@ -263,13 +278,17 @@ fun HomeScreen(
                 items = recentDownloads,
                 key = { "recent_${it.id}" }
             ) { task ->
+                val isPlayingHere = miniPlayerState.currentTask?.id == task.id &&
+                    miniPlayerState.isPlaying
                 DownloadItemCard(
                     task = task,
                     onCancel = onCancelDownload,
                     onRetry = onRetryDownload,
-                    onDelete = onDeleteDownload,
+                    onDelete = { pendingDeleteTaskId = it },
                     onOpen = { openDownloadedFile(context, it) },
-                    onShare = { shareDownloadedFile(context, it) }
+                    onShare = { shareDownloadedFile(context, it) },
+                    isPlayingInMiniPlayer = isPlayingHere,
+                    onPlayAudio = onPlayAudio
                 )
             }
         }
@@ -277,6 +296,21 @@ fun HomeScreen(
         item(key = "bottom_spacer") {
             Spacer(modifier = Modifier.height(8.dp))
         }
+    }
+
+    val targetDeleteId = pendingDeleteTaskId
+    if (targetDeleteId != null) {
+        DeleteDownloadConfirmDialog(
+            onDeleteWithFile = {
+                pendingDeleteTaskId = null
+                onDeleteDownload(targetDeleteId, true)
+            },
+            onDeleteHistoryOnly = {
+                pendingDeleteTaskId = null
+                onDeleteDownload(targetDeleteId, false)
+            },
+            onDismiss = { pendingDeleteTaskId = null }
+        )
     }
 }
 
@@ -522,10 +556,12 @@ private fun ClipboardDetectedCard(
 @Composable
 private fun UrlInputHeroCard(
     urlInput: String,
+    batchUrls: List<String>,
     onUrlInputChange: (String) -> Unit,
     onClear: () -> Unit,
     onPaste: () -> Unit,
-    onAnalyze: () -> Unit
+    onAnalyze: () -> Unit,
+    onBatchDownload: (Boolean) -> Unit
 ) {
     Surface(
         shape = RoundedCornerShape(24.dp),
@@ -582,7 +618,7 @@ private fun UrlInputHeroCard(
                         }
                     }
                 },
-                singleLine = true,
+                maxLines = 3,
                 shape = RoundedCornerShape(16.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = { onAnalyze() }),
@@ -593,6 +629,96 @@ private fun UrlInputHeroCard(
                     unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh
                 )
             )
+
+            // Çoklu Link (Batch URL) Hızlı Çubuğu
+            AnimatedVisibility(
+                visible = batchUrls.size > 1,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.45f))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(UlgenCardHighlightGradient)
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "${batchUrls.size} Bağlantıyı Toplu İndir (Video / MP3)",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { onBatchDownload(false) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                                contentPadding = PaddingValues()
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(UlgenPrimaryGradient, RoundedCornerShape(12.dp)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.Videocam,
+                                            contentDescription = null,
+                                            tint = Color.White,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Text(
+                                            text = "Toplu Video",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = { onBatchDownload(true) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(42.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.55f)),
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.MusicNote,
+                                    contentDescription = null,
+                                    tint = CoralPink,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.size(5.dp))
+                                Text(
+                                    text = "Toplu MP3",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             Button(
                 onClick = onAnalyze,

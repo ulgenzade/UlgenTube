@@ -1,5 +1,9 @@
 package com.ulgentube.app.util
 
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 /**
  * Dosya adlarından path traversal (`..`, `/`, `\`), kontrol karakterleri
  * ve dosya sistemleri için yasak karakterleri temizleyen yardımcı sınıf.
@@ -70,5 +74,39 @@ object FileNameSanitizer {
             "${base}_${sanitize(suffix, maxLength = 24)}"
         }
         return "$fullBase.$cleanExt"
+    }
+
+    /**
+     * Kullanıcı tanımlı dosya adı şablonunu (`{title}`, `{author}`, `{date}`)
+     * doldurur ve sonucu [buildFileName] üzerinden güvenli şekilde temizler.
+     */
+    fun applyTemplate(
+        template: String,
+        title: String,
+        author: String?,
+        extension: String,
+        suffix: String? = null
+    ): String {
+        val effectiveTemplate = template.trim().ifBlank { "{title}" }
+        val dateText = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val safeAuthor = author?.trim().orEmpty()
+        val safeTitle = title.trim().ifBlank { FALLBACK_NAME }
+
+        var rendered = effectiveTemplate
+            .replace("{title}", safeTitle, ignoreCase = true)
+            .replace("{author}", safeAuthor, ignoreCase = true)
+            .replace("{date}", dateText, ignoreCase = true)
+
+        // Yazar bilgisi boşsa şablonda kalan boş ayraçları (örn. " - Başlık") temizle
+        rendered = rendered
+            .replace(Regex("""\s*[-–—_]\s*[-–—_]\s*"""), " - ")
+            .trim()
+            .trim('-', '_', ' ', '.')
+
+        if (rendered.isBlank()) {
+            rendered = safeTitle
+        }
+
+        return buildFileName(rawTitle = rendered, extension = extension, suffix = suffix)
     }
 }

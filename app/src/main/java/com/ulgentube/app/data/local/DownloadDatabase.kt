@@ -44,7 +44,11 @@ data class DownloadEntity(
     val isAudioExtraction: Boolean,
     val transcodeTargetHeight: Int?,
     val targetExtension: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val clipStartSeconds: Long? = null,
+    val clipEndSeconds: Long? = null,
+    val subtitleLang: String? = null,
+    val embedSubtitles: Boolean = false
 )
 
 fun DownloadEntity.toDomain(): DownloadTask {
@@ -71,7 +75,11 @@ fun DownloadEntity.toDomain(): DownloadTask {
         isAudioExtraction = isAudioExtraction,
         transcodeTargetHeight = transcodeTargetHeight,
         targetExtension = targetExtension,
-        createdAt = createdAt
+        createdAt = createdAt,
+        clipStartSeconds = clipStartSeconds,
+        clipEndSeconds = clipEndSeconds,
+        subtitleLang = subtitleLang,
+        embedSubtitles = embedSubtitles
     )
 }
 
@@ -99,7 +107,11 @@ fun DownloadTask.toEntity(): DownloadEntity {
         isAudioExtraction = isAudioExtraction,
         transcodeTargetHeight = transcodeTargetHeight,
         targetExtension = targetExtension,
-        createdAt = createdAt
+        createdAt = createdAt,
+        clipStartSeconds = clipStartSeconds,
+        clipEndSeconds = clipEndSeconds,
+        subtitleLang = subtitleLang,
+        embedSubtitles = embedSubtitles
     )
 }
 
@@ -111,6 +123,9 @@ interface DownloadDao {
 
     @Query("SELECT * FROM downloads WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): DownloadEntity?
+
+    @Query("SELECT * FROM downloads WHERE url = :url AND status = 'COMPLETED' ORDER BY createdAt DESC LIMIT 1")
+    suspend fun findCompletedByUrl(url: String): DownloadEntity?
 
     @Query("SELECT * FROM downloads WHERE status IN ('QUEUED', 'DOWNLOADING', 'MERGING') ORDER BY createdAt ASC")
     suspend fun getPendingTasks(): List<DownloadEntity>
@@ -169,7 +184,7 @@ interface DownloadDao {
 
 @Database(
     entities = [DownloadEntity::class],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class UlgenTubeDatabase : RoomDatabase() {
@@ -184,6 +199,15 @@ abstract class UlgenTubeDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE downloads ADD COLUMN clipStartSeconds INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE downloads ADD COLUMN clipEndSeconds INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE downloads ADD COLUMN subtitleLang TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE downloads ADD COLUMN embedSubtitles INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         @Volatile
         private var INSTANCE: UlgenTubeDatabase? = null
 
@@ -194,7 +218,7 @@ abstract class UlgenTubeDatabase : RoomDatabase() {
                     UlgenTubeDatabase::class.java,
                     DATABASE_NAME
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also { INSTANCE = it }
             }

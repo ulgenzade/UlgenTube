@@ -9,7 +9,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,6 +33,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,14 +42,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ulgentube.app.domain.model.DownloadStatus
 import com.ulgentube.app.ui.components.MediaDownloadSheetContent
+import com.ulgentube.app.ui.components.MiniPlayerBar
 import com.ulgentube.app.ui.screens.DownloadsScreen
 import com.ulgentube.app.ui.screens.HomeScreen
 import com.ulgentube.app.ui.screens.SettingsScreen
+import com.ulgentube.app.ui.screens.openDownloadedFile
 import com.ulgentube.app.ui.theme.UlgenTubeTheme
 import com.ulgentube.app.ui.viewmodel.AnalyzeUiState
 import com.ulgentube.app.ui.viewmodel.MainViewModel
@@ -112,6 +118,7 @@ private fun UlgenMainScaffold(
     viewModel: MainViewModel,
     onUpdateYtDlp: () -> Unit
 ) {
+    val context = LocalContext.current
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val engineState by viewModel.engineState.collectAsStateWithLifecycle()
@@ -119,10 +126,31 @@ private fun UlgenMainScaffold(
     val urlInput by viewModel.urlInput.collectAsStateWithLifecycle()
     val ytDlpUpdateMessage by viewModel.ytDlpUpdateState.collectAsStateWithLifecycle()
     val isUpdatingYtDlp by viewModel.isUpdatingYtDlp.collectAsStateWithLifecycle()
+    val miniPlayerState by viewModel.miniPlayerState.collectAsStateWithLifecycle()
+    val studioBusy by viewModel.studioBusy.collectAsStateWithLifecycle()
+    val studioMessage by viewModel.studioMessage.collectAsStateWithLifecycle()
+    val hasCookies by viewModel.hasCookies.collectAsStateWithLifecycle()
+    val cookieMessage by viewModel.cookieMessage.collectAsStateWithLifecycle()
 
     var currentDestination by rememberSaveable { mutableStateOf(UlgenDestination.HOME) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(studioMessage) {
+        val msg = studioMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearStudioMessage()
+        }
+    }
+
+    LaunchedEffect(cookieMessage) {
+        val msg = cookieMessage
+        if (!msg.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(msg)
+            viewModel.clearCookieMessage()
+        }
+    }
 
     val activeDownloadCount = remember(downloads) {
         downloads.count {
@@ -137,53 +165,62 @@ private fun UlgenMainScaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
         bottomBar = {
-            NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                tonalElevation = 0.dp
-            ) {
-                UlgenDestination.entries.forEach { destination ->
-                    val isSelected = currentDestination == destination
-                    NavigationBarItem(
-                        selected = isSelected,
-                        onClick = { currentDestination = destination },
-                        icon = {
-                            if (destination == UlgenDestination.DOWNLOADS && activeDownloadCount > 0) {
-                                BadgedBox(
-                                    badge = {
-                                        Badge(
-                                            containerColor = MaterialTheme.colorScheme.secondary,
-                                            contentColor = MaterialTheme.colorScheme.onSecondary
-                                        ) {
-                                            Text(text = activeDownloadCount.toString())
+            Column(modifier = Modifier.fillMaxWidth()) {
+                MiniPlayerBar(
+                    state = miniPlayerState,
+                    onTogglePlayPause = viewModel::togglePlayPause,
+                    onSeekTo = viewModel::seekTo,
+                    onStop = viewModel::stopMiniPlayer
+                )
+
+                NavigationBar(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 0.dp
+                ) {
+                    UlgenDestination.entries.forEach { destination ->
+                        val isSelected = currentDestination == destination
+                        NavigationBarItem(
+                            selected = isSelected,
+                            onClick = { currentDestination = destination },
+                            icon = {
+                                if (destination == UlgenDestination.DOWNLOADS && activeDownloadCount > 0) {
+                                    BadgedBox(
+                                        badge = {
+                                            Badge(
+                                                containerColor = MaterialTheme.colorScheme.secondary,
+                                                contentColor = MaterialTheme.colorScheme.onSecondary
+                                            ) {
+                                                Text(text = activeDownloadCount.toString())
+                                            }
                                         }
+                                    ) {
+                                        Icon(
+                                            imageVector = destination.icon,
+                                            contentDescription = destination.label
+                                        )
                                     }
-                                ) {
+                                } else {
                                     Icon(
                                         imageVector = destination.icon,
                                         contentDescription = destination.label
                                     )
                                 }
-                            } else {
-                                Icon(
-                                    imageVector = destination.icon,
-                                    contentDescription = destination.label
+                            },
+                            label = {
+                                Text(
+                                    text = destination.label,
+                                    style = MaterialTheme.typography.labelMedium
                                 )
-                            }
-                        },
-                        label = {
-                            Text(
-                                text = destination.label,
-                                style = MaterialTheme.typography.labelMedium
+                            },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                    )
+                    }
                 }
             }
         }
@@ -199,14 +236,22 @@ private fun UlgenMainScaffold(
                     downloads = downloads,
                     settings = settings,
                     engineState = engineState,
+                    miniPlayerState = miniPlayerState,
                     onUrlInputChange = viewModel::onUrlInputChange,
                     onClearUrl = viewModel::clearUrlInput,
                     onAnalyzeUrl = viewModel::analyzeUrl,
+                    onBatchDownloadUrls = { urls, audioOnly ->
+                        viewModel.startBatchUrlsDownload(urls, audioOnly)
+                        scope.launch {
+                            snackbarHostState.showSnackbar("${urls.size} bağlantı kuyruğa eklendi")
+                        }
+                    },
                     onRetryEngineInit = viewModel::retryEngineInit,
                     onViewAllDownloads = { currentDestination = UlgenDestination.DOWNLOADS },
                     onCancelDownload = viewModel::cancel,
                     onRetryDownload = viewModel::retry,
-                    onDeleteDownload = viewModel::delete,
+                    onDeleteDownload = viewModel::deleteDownload,
+                    onPlayAudio = viewModel::playAudio,
                     modifier = contentModifier
                 )
             }
@@ -214,10 +259,14 @@ private fun UlgenMainScaffold(
             UlgenDestination.DOWNLOADS -> {
                 DownloadsScreen(
                     downloads = downloads,
+                    miniPlayerState = miniPlayerState,
+                    studioBusy = studioBusy,
                     onCancel = viewModel::cancel,
                     onRetry = viewModel::retry,
-                    onDelete = viewModel::delete,
+                    onDelete = viewModel::deleteDownload,
                     onClearCompleted = viewModel::clearCompleted,
+                    onPlayAudio = viewModel::playAudio,
+                    onRunFfmpegStudio = viewModel::runFfmpegStudio,
                     modifier = contentModifier
                 )
             }
@@ -227,6 +276,7 @@ private fun UlgenMainScaffold(
                     settings = settings,
                     ytDlpUpdateMessage = ytDlpUpdateMessage,
                     isUpdatingYtDlp = isUpdatingYtDlp,
+                    hasCookies = hasCookies,
                     onSetThemeMode = viewModel::setThemeMode,
                     onSetDynamicColor = viewModel::setDynamicColor,
                     onSetDefaultVideoQuality = viewModel::setDefaultVideoQuality,
@@ -234,6 +284,15 @@ private fun UlgenMainScaffold(
                     onSetUseAria2c = viewModel::setUseAria2c,
                     onSetEmbedThumbnail = viewModel::setEmbedThumbnail,
                     onSetAutoDetectClipboard = viewModel::setAutoDetectClipboard,
+                    onSetSponsorBlockEnabled = viewModel::setSponsorBlockEnabled,
+                    onSetEmbedChapters = viewModel::setEmbedChapters,
+                    onSetWifiOnly = viewModel::setWifiOnly,
+                    onSetZeroFrictionShareMode = viewModel::setZeroFrictionShareMode,
+                    onSetPlatformSubfolders = viewModel::setPlatformSubfolders,
+                    onSetFileNameTemplate = viewModel::setFileNameTemplate,
+                    onSetCookiesEnabled = viewModel::setCookiesEnabled,
+                    onImportCookies = viewModel::importCookies,
+                    onClearCookies = viewModel::clearCookies,
                     onUpdateYtDlp = onUpdateYtDlp,
                     modifier = contentModifier
                 )
@@ -252,8 +311,20 @@ private fun UlgenMainScaffold(
         ) {
             MediaDownloadSheetContent(
                 state = analyzeState,
-                onSelectFormat = { media, option ->
-                    viewModel.startFormatDownload(media, option)
+                settings = settings,
+                onOpenDuplicate = { task ->
+                    viewModel.dismissAnalyzeSheet()
+                    openDownloadedFile(context, task)
+                },
+                onSelectFormat = { media, option, clipStart, clipEnd, subtitleLang, embedSubtitles ->
+                    viewModel.startFormatDownload(
+                        media = media,
+                        option = option,
+                        clipStartSeconds = clipStart,
+                        clipEndSeconds = clipEnd,
+                        subtitleLang = subtitleLang,
+                        embedSubtitles = embedSubtitles
+                    )
                     scope.launch {
                         snackbarHostState.showSnackbar("İndirme başlatıldı")
                     }
@@ -268,6 +339,12 @@ private fun UlgenMainScaffold(
                     viewModel.startAllImagesDownload(media)
                     scope.launch {
                         snackbarHostState.showSnackbar("Tüm görseller kuyruğa eklendi")
+                    }
+                },
+                onDownloadPlaylist = { entries, platform, audioOnly ->
+                    viewModel.startPlaylistDownload(entries, platform, audioOnly)
+                    scope.launch {
+                        snackbarHostState.showSnackbar("${entries.size} öğe kuyruğa eklendi")
                     }
                 },
                 onRetry = { originalInput ->

@@ -11,11 +11,16 @@ import com.ulgentube.app.domain.model.ExtractedMedia
 import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaCategory
 import com.ulgentube.app.domain.model.MediaFormatOption
+import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.domain.model.PlaylistEntry
 import com.ulgentube.app.engine.MediaStoreSaver
 import com.ulgentube.app.engine.SocialImageExtractor
 import com.ulgentube.app.engine.YtDlpEngine
 import com.ulgentube.app.service.DownloadForegroundService
+import com.ulgentube.app.util.ErrorMessageSanitizer
 import com.ulgentube.app.util.FileNameSanitizer
+import com.ulgentube.app.util.NetworkSecurityGuard
+import com.ulgentube.app.util.UrlSanitizer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,12 +30,13 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * İndirme görevlerinin yaşam döngüsünü, Room veritabanı senkronizasyonunu
- * ve çalışan iş parçacıklarının iptal/yeniden deneme yönetimini üstlenir.
+ * ve çalışan iş parçacıklarının iptal/yeniden deneme/resume yönetimini üstlenir.
  */
 class DownloadRepository(
     private val context: Context,
@@ -49,15 +55,30 @@ class DownloadRepository(
     }
 
     /**
-     * Video veya ses format seçeneğini indirme kuyruğuna ekler ve ön plan servisini başlatır.
+     * Verilen URL daha önce başarıyla indirilmişse ilgili tamamlanmış görevi döndürür.
+     */
+    suspend fun findDuplicateCompleted(url: String): DownloadTask? = withContext(Dispatchers.IO) {
+        downloadDao.findCompletedByUrl(url)?.toDomain()
+    }
+
+    /**
+     * Video veya ses format seçeneğini (opsiyonel kırpma ve altyazı ayarlarıyla)
+     * indirme kuyruğuna ekler ve ön plan servisini başlatır.
      */
     suspend fun enqueue(
         media: ExtractedMedia,
-        option: MediaFormatOption
+        option: MediaFormatOption,
+        clipStartSeconds: Long? = null,
+        clipEndSeconds: Long? = null,
+        subtitleLang: String? = null,
+        embedSubtitles: Boolean = false
     ): DownloadTask = withContext(Dispatchers.IO) {
+        val settings = settingsRepository.getCurrentSettings()
         val taskId = UUID.randomUUID().toString()
-        val fileName = FileNameSanitizer.buildFileName(
-            rawTitle = media.title,
+        val fileName = FileNameSanitizer.applyTemplate(
+            template = settings.fileNameTemplate,
+            title = media.title,
+            author = media.author,
             extension = option.extension
         )
 
@@ -77,12 +98,150 @@ class DownloadRepository(
             directUrl = option.directUrl,
             isAudioExtraction = option.isAudioExtraction,
             transcodeTargetHeight = option.transcodeTargetHeight,
-            targetExtension = option.extension
+            targetExtension = option.extension,
+            clipStartSeconds = clipStartSeconds,
+            clipEndSeconds = clipEndSeconds,
+            subtitleLang = subtitleLang?.trim()?.takeIf { it.isNotEmpty() },
+            embedSubtitles = embedSubtitles
         )
 
         downloadDao.upsert(task.toEntity())
         DownloadForegroundService.start(context)
         task
+    }
+
+    /**
+     * Birden fazla bağlantıyı varsayılan kalite/ses ayarlarıyla toplu olarak kuyruğa ekler
+     * ve indirme servisini tek seferde başlatır.
+     */
+    suspend fun enqueueBatchUrls(
+        urls: List<String>,
+        audioOnly: Boolean = false
+    ): List<DownloadTask> = withContext(Dispatchers.IO) {
+        if (urls.isEmpty()) return@withContext emptyList()
+
+        val settings = settingsRepository.getCurrentSettings()
+        val created = mutableListOf<DownloadTask>()
+
+        urls.forEachIndexed { index, rawUrl ->
+            val safeUrl = UrlSanitizer.extractFirstValidUrl(rawUrl) ?: return@forEachIndexed
+            val platform = UrlSanitizer.detectPlatform(safeUrl)
+            val taskId = UUID.randomUUID().toString()
+            val title = "${platform.displayName} Medya #${index + 1}"
+
+            val category = if (audioOnly) MediaCategory.AUDIO else MediaCategory.VIDEO
+            val targetExt = if (audioOnly) {
+                settings.defaultAudioFormat.lowercase(Locale.ROOT).ifBlank { "mp3" }
+            } else {
+                "mp4"
+            }
+            val formatLabel = if (audioOnly) {
+                "${targetExt.uppercase(Locale.ROOT)} • Hızlı Ses"
+            } else {
+                "${settings.defaultVideoQuality} • Hızlı Video"
+            }
+            val selector = if (audioOnly) {
+                "bestaudio/best"
+            } else {
+                buildDefaultVideoSelector(settings.defaultVideoQuality)
+            }
+
+            val fileName = FileNameSanitizer.applyTemplate(
+                template = settings.fileNameTemplate,
+                title = title,
+                author = null,
+                extension = targetExt
+            )
+
+            val task = DownloadTask(
+                id = taskId,
+                url = safeUrl,
+                title = title,
+                author = null,
+                thumbnailUrl = null,
+                platform = platform,
+                category = category,
+                formatLabel = formatLabel,
+                fileName = fileName,
+                status = DownloadStatus.QUEUED,
+                ytDlpFormatSelector = selector,
+                isAudioExtraction = audioOnly,
+                targetExtension = targetExt
+            )
+
+            downloadDao.upsert(task.toEntity())
+            created.add(task)
+        }
+
+        if (created.isNotEmpty()) {
+            DownloadForegroundService.start(context)
+        }
+        created
+    }
+
+    /**
+     * Oynatma listesinden seçilen öğeleri toplu olarak kuyruğa ekler ve servisi tek seferde başlatır.
+     */
+    suspend fun enqueuePlaylistEntries(
+        entries: List<PlaylistEntry>,
+        platform: PlatformType,
+        audioOnly: Boolean
+    ): List<DownloadTask> = withContext(Dispatchers.IO) {
+        if (entries.isEmpty()) return@withContext emptyList()
+
+        val settings = settingsRepository.getCurrentSettings()
+        val targetExt = if (audioOnly) {
+            settings.defaultAudioFormat.lowercase(Locale.ROOT).ifBlank { "mp3" }
+        } else {
+            "mp4"
+        }
+        val category = if (audioOnly) MediaCategory.AUDIO else MediaCategory.VIDEO
+        val formatLabel = if (audioOnly) {
+            "${targetExt.uppercase(Locale.ROOT)} • Oynatma Listesi"
+        } else {
+            "${settings.defaultVideoQuality} • Oynatma Listesi"
+        }
+        val selector = if (audioOnly) {
+            "bestaudio/best"
+        } else {
+            buildDefaultVideoSelector(settings.defaultVideoQuality)
+        }
+
+        val created = mutableListOf<DownloadTask>()
+        entries.forEach { entry ->
+            val safeUrl = UrlSanitizer.extractFirstValidUrl(entry.url) ?: return@forEach
+            val safeThumb = entry.thumbnailUrl?.takeIf { NetworkSecurityGuard.isSafePublicUrl(it) }
+            val fileName = FileNameSanitizer.applyTemplate(
+                template = settings.fileNameTemplate,
+                title = entry.title,
+                author = entry.author,
+                extension = targetExt
+            )
+
+            val task = DownloadTask(
+                id = UUID.randomUUID().toString(),
+                url = safeUrl,
+                title = entry.title,
+                author = entry.author,
+                thumbnailUrl = safeThumb,
+                platform = platform,
+                category = category,
+                formatLabel = formatLabel,
+                fileName = fileName,
+                status = DownloadStatus.QUEUED,
+                ytDlpFormatSelector = selector,
+                isAudioExtraction = audioOnly,
+                targetExtension = targetExt
+            )
+
+            downloadDao.upsert(task.toEntity())
+            created.add(task)
+        }
+
+        if (created.isNotEmpty()) {
+            DownloadForegroundService.start(context)
+        }
+        created
     }
 
     /**
@@ -93,9 +252,12 @@ class DownloadRepository(
         imageItem: ImageItem,
         indexSuffix: String? = null
     ): DownloadTask = withContext(Dispatchers.IO) {
+        val settings = settingsRepository.getCurrentSettings()
         val taskId = UUID.randomUUID().toString()
-        val fileName = FileNameSanitizer.buildFileName(
-            rawTitle = media.title,
+        val fileName = FileNameSanitizer.applyTemplate(
+            template = settings.fileNameTemplate,
+            title = media.title,
+            author = media.author,
             extension = imageItem.extension,
             suffix = indexSuffix
         )
@@ -126,11 +288,14 @@ class DownloadRepository(
     suspend fun enqueueAllImages(media: ExtractedMedia): List<DownloadTask> = withContext(Dispatchers.IO) {
         if (media.imageItems.isEmpty()) return@withContext emptyList()
 
+        val settings = settingsRepository.getCurrentSettings()
         val created = media.imageItems.mapIndexed { index, item ->
             val taskId = UUID.randomUUID().toString()
             val suffix = if (media.imageItems.size > 1) "${index + 1}" else null
-            val fileName = FileNameSanitizer.buildFileName(
-                rawTitle = media.title,
+            val fileName = FileNameSanitizer.applyTemplate(
+                template = settings.fileNameTemplate,
+                title = media.title,
+                author = media.author,
                 extension = item.extension,
                 suffix = suffix
             )
@@ -219,6 +384,7 @@ class DownloadRepository(
 
     /**
      * Başarısız veya iptal edilmiş bir görevi sıfırlayarak yeniden kuyruğa alır.
+     * Geçici klasördeki `.part` dosyaları korunduğu için yt-dlp `--continue` ile kaldığı yerden devam eder.
      */
     suspend fun retry(taskId: String) = withContext(Dispatchers.IO) {
         val existing = downloadDao.getById(taskId)?.toDomain() ?: return@withContext
@@ -235,10 +401,26 @@ class DownloadRepository(
 
     /**
      * Görevi iptal edip veritabanından tamamen siler.
+     * [deletePhysicalFile] `true` ise kaydedilmiş medya dosyasını da cihazdan güvenli şekilde siler.
      */
-    suspend fun delete(taskId: String) = withContext(Dispatchers.IO) {
+    suspend fun delete(
+        taskId: String,
+        deletePhysicalFile: Boolean = false
+    ) = withContext(Dispatchers.IO) {
         ytDlpEngine.cancel(taskId)
         activeJobs.remove(taskId)?.cancel()
+
+        if (deletePhysicalFile) {
+            val entity = downloadDao.getById(taskId)
+            if (entity != null) {
+                mediaStoreSaver.deleteMediaFile(
+                    savedUri = entity.savedUri,
+                    savedPath = entity.savedPath
+                )
+            }
+        }
+
+        cleanupTaskWorkDir(taskId)
         downloadDao.deleteById(taskId)
     }
 
@@ -251,9 +433,9 @@ class DownloadRepository(
 
     /**
      * Tek bir indirme görevini uçtan uca yürütür:
-     * 1) Geçici klasöre indirir (doğrudan URL veya yt-dlp)
-     * 2) MediaStoreSaver ile Movies/Music/Pictures/UlgenTube içine kaydeder
-     * 3) Geçici dosyaları temizler ve Room kaydını günceller.
+     * 1) Geçici klasöre indirir (doğrudan URL veya yt-dlp; yarıda kalmış `.part` dosyalarını korur)
+     * 2) MediaStoreSaver ile Movies/Music/Pictures/UlgenTube (veya platform alt klasörü) içine kaydeder
+     * 3) Yalnızca tamamlandığında geçici dosyaları temizler ve Room kaydını günceller.
      */
     suspend fun executeDownload(
         task: DownloadTask,
@@ -267,10 +449,12 @@ class DownloadRepository(
         if (!tempDir.canonicalPath.startsWith(canonicalWorkRoot)) {
             return@withContext Result.failure(SecurityException("Geçersiz çalışma dizini."))
         }
-        if (tempDir.exists()) {
-            tempDir.deleteRecursively()
+        // Resume koruması: mevcut .part dosyalarını silme, yalnızca klasör yoksa oluştur
+        if (!tempDir.exists()) {
+            tempDir.mkdirs()
         }
-        tempDir.mkdirs()
+
+        var completedSuccessfully = false
 
         try {
             downloadDao.updateProgress(
@@ -287,7 +471,10 @@ class DownloadRepository(
 
             val requiresYtDlpOrFfmpeg = task.isAudioExtraction ||
                 task.category == MediaCategory.AUDIO ||
-                task.transcodeTargetHeight != null
+                task.transcodeTargetHeight != null ||
+                task.clipStartSeconds != null ||
+                task.clipEndSeconds != null ||
+                !task.subtitleLang.isNullOrBlank()
 
             val downloadedFile: File = if (!task.directUrl.isNullOrBlank() && !requiresYtDlpOrFfmpeg) {
                 val safeFileName = FileNameSanitizer.buildFileName(
@@ -345,10 +532,17 @@ class DownloadRepository(
             )
             onProgressUpdate(99f, null, DownloadStatus.MERGING)
 
+            val platformSubfolder = if (settings.platformSubfolders) {
+                task.platform.displayName
+            } else {
+                null
+            }
+
             val saved = mediaStoreSaver.save(
                 sourceFile = downloadedFile,
                 desiredFileName = task.fileName,
-                category = task.category
+                category = task.category,
+                platformSubfolder = platformSubfolder
             )
 
             downloadDao.updateStatus(
@@ -359,6 +553,7 @@ class DownloadRepository(
                 savedPath = saved.displayPath,
                 fileSizeBytes = saved.fileSizeBytes
             )
+            completedSuccessfully = true
             onProgressUpdate(100f, null, DownloadStatus.COMPLETED)
 
             val completedTask = task.copy(
@@ -380,7 +575,7 @@ class DownloadRepository(
             )
             throw cancel
         } catch (e: Exception) {
-            val friendlyMessage = com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(
+            val friendlyMessage = ErrorMessageSanitizer.sanitize(
                 throwable = e,
                 fallback = "İndirme sırasında beklenmeyen bir hata oluştu."
             )
@@ -391,7 +586,38 @@ class DownloadRepository(
             )
             Result.failure(e)
         } finally {
-            runCatching { tempDir.deleteRecursively() }
+            if (completedSuccessfully) {
+                runCatching { tempDir.deleteRecursively() }
+            }
+        }
+    }
+
+    private fun cleanupTaskWorkDir(taskId: String) {
+        val safeTaskId = taskId.takeIf { SAFE_TASK_ID_REGEX.matches(it) } ?: return
+        runCatching {
+            val workRoot = File(context.cacheDir, "dl_work")
+            val tempDir = File(workRoot, safeTaskId)
+            val canonicalWorkRoot = workRoot.canonicalPath + File.separator
+            if (tempDir.exists() && tempDir.canonicalPath.startsWith(canonicalWorkRoot)) {
+                tempDir.deleteRecursively()
+            }
+        }
+    }
+
+    private fun buildDefaultVideoSelector(qualityLabel: String): String {
+        val maxHeight = when {
+            qualityLabel.contains("2160") || qualityLabel.contains("4K", ignoreCase = true) -> 2160
+            qualityLabel.contains("1440") || qualityLabel.contains("2K", ignoreCase = true) -> 1440
+            qualityLabel.contains("1080") -> 1080
+            qualityLabel.contains("720") -> 720
+            qualityLabel.contains("480") -> 480
+            qualityLabel.contains("360") -> 360
+            else -> null
+        }
+        return if (maxHeight != null) {
+            "bestvideo[height<=$maxHeight]+bestaudio[ext=m4a]/bestvideo[height<=$maxHeight]+bestaudio/best[height<=$maxHeight]/best"
+        } else {
+            "bestvideo+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
         }
     }
 

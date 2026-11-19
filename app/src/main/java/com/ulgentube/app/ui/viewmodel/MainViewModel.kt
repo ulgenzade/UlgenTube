@@ -1,6 +1,7 @@
 package com.ulgentube.app.ui.viewmodel
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -10,10 +11,14 @@ import com.ulgentube.app.di.AppContainer
 import com.ulgentube.app.domain.model.AppSettings
 import com.ulgentube.app.domain.model.DownloadTask
 import com.ulgentube.app.domain.model.ExtractedMedia
+import com.ulgentube.app.domain.model.FfmpegStudioAction
 import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaFormatOption
 import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.domain.model.PlaylistEntry
 import com.ulgentube.app.domain.model.ThemeMode
+import com.ulgentube.app.player.MiniPlayerState
+import com.ulgentube.app.util.ErrorMessageSanitizer
 import com.ulgentube.app.util.UrlSanitizer
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,6 +56,8 @@ class MainViewModel(
     val engineState: StateFlow<EngineInitState> =
         appInstance?.engineInitState ?: MutableStateFlow(EngineInitState.Idle)
 
+    val miniPlayerState: StateFlow<MiniPlayerState> = container.miniAudioPlayerManager.state
+
     private val _analyzeState = MutableStateFlow<AnalyzeUiState>(AnalyzeUiState.Idle)
     val analyzeState: StateFlow<AnalyzeUiState> = _analyzeState.asStateFlow()
 
@@ -62,6 +69,18 @@ class MainViewModel(
 
     private val _isUpdatingYtDlp = MutableStateFlow(false)
     val isUpdatingYtDlp: StateFlow<Boolean> = _isUpdatingYtDlp.asStateFlow()
+
+    private val _studioBusy = MutableStateFlow(false)
+    val studioBusy: StateFlow<Boolean> = _studioBusy.asStateFlow()
+
+    private val _studioMessage = MutableStateFlow<String?>(null)
+    val studioMessage: StateFlow<String?> = _studioMessage.asStateFlow()
+
+    private val _hasCookies = MutableStateFlow(container.cookieRepository.hasCookies())
+    val hasCookies: StateFlow<Boolean> = _hasCookies.asStateFlow()
+
+    private val _cookieMessage = MutableStateFlow<String?>(null)
+    val cookieMessage: StateFlow<String?> = _cookieMessage.asStateFlow()
 
     private var analyzeJob: Job? = null
 
@@ -100,10 +119,16 @@ class MainViewModel(
 
             val result = container.hybridMediaExtractor.analyze(cleanUrl)
             _analyzeState.value = result.fold(
-                onSuccess = { media -> AnalyzeUiState.Success(media) },
+                onSuccess = { media ->
+                    val duplicate = container.downloadRepository.findDuplicateCompleted(media.originalUrl)
+                    AnalyzeUiState.Success(
+                        media = media,
+                        duplicateTask = duplicate
+                    )
+                },
                 onFailure = { error ->
                     AnalyzeUiState.Error(
-                        message = com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(
+                        message = ErrorMessageSanitizer.sanitize(
                             throwable = error,
                             fallback = "Bağlantı analiz edilemedi. Bağlantının herkese açık olduğundan emin olun."
                         ),
@@ -119,11 +144,55 @@ class MainViewModel(
         _analyzeState.value = AnalyzeUiState.Idle
     }
 
-    fun startFormatDownload(media: ExtractedMedia, option: MediaFormatOption) {
+    fun startFormatDownload(
+        media: ExtractedMedia,
+        option: MediaFormatOption,
+        clipStartSeconds: Long? = null,
+        clipEndSeconds: Long? = null,
+        subtitleLang: String? = null,
+        embedSubtitles: Boolean = false
+    ) {
         viewModelScope.launch {
-            container.downloadRepository.enqueue(media, option)
+            container.downloadRepository.enqueue(
+                media = media,
+                option = option,
+                clipStartSeconds = clipStartSeconds,
+                clipEndSeconds = clipEndSeconds,
+                subtitleLang = subtitleLang,
+                embedSubtitles = embedSubtitles
+            )
         }
         _analyzeState.value = AnalyzeUiState.Idle
+    }
+
+    fun startPlaylistDownload(
+        entries: List<PlaylistEntry>,
+        platform: PlatformType,
+        audioOnly: Boolean
+    ) {
+        if (entries.isEmpty()) return
+        viewModelScope.launch {
+            container.downloadRepository.enqueuePlaylistEntries(
+                entries = entries,
+                platform = platform,
+                audioOnly = audioOnly
+            )
+        }
+        _analyzeState.value = AnalyzeUiState.Idle
+    }
+
+    fun startBatchUrlsDownload(
+        urls: List<String>,
+        audioOnly: Boolean
+    ) {
+        if (urls.isEmpty()) return
+        viewModelScope.launch {
+            container.downloadRepository.enqueueBatchUrls(
+                urls = urls,
+                audioOnly = audioOnly
+            )
+        }
+        _urlInput.value = ""
     }
 
     fun startImageDownload(media: ExtractedMedia, image: ImageItem) {
@@ -140,6 +209,96 @@ class MainViewModel(
         _analyzeState.value = AnalyzeUiState.Idle
     }
 
+    // Mini Müzik Çalar Kontrolleri
+    fun playAudio(task: DownloadTask) {
+        val current = miniPlayerState.value.currentTask
+        if (current?.id == task.id) {
+            container.miniAudioPlayerManager.togglePlayPause()
+        } else {
+            container.miniAudioPlayerManager.play(task)
+        }
+    }
+
+    fun togglePlayPause() {
+        container.miniAudioPlayerManager.togglePlayPause()
+    }
+
+    fun seekTo(ms: Long) {
+        container.miniAudioPlayerManager.seekTo(ms)
+    }
+
+    fun stopMiniPlayer() {
+        container.miniAudioPlayerManager.stop()
+    }
+
+    // FFmpeg Medya Stüdyosu
+    fun clearStudioMessage() {
+        _studioMessage.value = null
+    }
+
+    fun runFfmpegStudio(
+        sourceUri: Uri,
+        baseName: String,
+        action: FfmpegStudioAction
+    ) {
+        if (_studioBusy.value) return
+        viewModelScope.launch {
+            _studioBusy.value = true
+            _studioMessage.value = "${action.displayName} işleniyor..."
+            waitForEngineIfInitializing()
+            val result = container.localFfmpegProcessor.process(
+                inputUri = sourceUri,
+                action = action,
+                outputBaseName = baseName
+            )
+            _studioMessage.value = result.fold(
+                onSuccess = { saved ->
+                    "${action.displayName} tamamlandı: ${saved.displayPath}"
+                },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Dönüştürme işlemi tamamlanamadı."
+                    )
+                }
+            )
+            _studioBusy.value = false
+        }
+    }
+
+    // Çerez (Cookies) Yönetimi
+    fun clearCookieMessage() {
+        _cookieMessage.value = null
+    }
+
+    fun importCookies(uri: Uri) {
+        viewModelScope.launch {
+            val result = container.cookieRepository.importFromUri(uri)
+            result.fold(
+                onSuccess = { count ->
+                    _hasCookies.value = container.cookieRepository.hasCookies()
+                    container.settingsRepository.setCookiesEnabled(true)
+                    _cookieMessage.value = "$count çerez satırı başarıyla içe aktarıldı."
+                },
+                onFailure = { error ->
+                    _cookieMessage.value = ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Çerez dosyası içe aktarılamadı."
+                    )
+                }
+            )
+        }
+    }
+
+    fun clearCookies() {
+        viewModelScope.launch {
+            container.cookieRepository.clearCookies()
+            _hasCookies.value = container.cookieRepository.hasCookies()
+            container.settingsRepository.setCookiesEnabled(false)
+            _cookieMessage.value = "Kayıtlı çerezler temizlendi."
+        }
+    }
+
     // İndirme Yönetimi
     fun cancel(taskId: String) {
         viewModelScope.launch {
@@ -153,9 +312,15 @@ class MainViewModel(
         }
     }
 
-    fun delete(taskId: String) {
+    fun deleteDownload(taskId: String, deletePhysicalFile: Boolean) {
+        if (miniPlayerState.value.currentTask?.id == taskId) {
+            container.miniAudioPlayerManager.stop()
+        }
         viewModelScope.launch {
-            container.downloadRepository.delete(taskId)
+            container.downloadRepository.delete(
+                taskId = taskId,
+                deletePhysicalFile = deletePhysicalFile
+            )
         }
     }
 
@@ -208,6 +373,48 @@ class MainViewModel(
         }
     }
 
+    fun setSponsorBlockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setSponsorBlockEnabled(enabled)
+        }
+    }
+
+    fun setEmbedChapters(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setEmbedChapters(enabled)
+        }
+    }
+
+    fun setWifiOnly(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setWifiOnly(enabled)
+        }
+    }
+
+    fun setZeroFrictionShareMode(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setZeroFrictionShareMode(enabled)
+        }
+    }
+
+    fun setPlatformSubfolders(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setPlatformSubfolders(enabled)
+        }
+    }
+
+    fun setFileNameTemplate(template: String) {
+        viewModelScope.launch {
+            container.settingsRepository.setFileNameTemplate(template)
+        }
+    }
+
+    fun setCookiesEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setCookiesEnabled(enabled)
+        }
+    }
+
     fun retryEngineInit() {
         appInstance?.initializeEngines()
     }
@@ -223,7 +430,7 @@ class MainViewModel(
                 onSuccess = { message -> message },
                 onFailure = { error ->
                     "Güncelleme başarısız: ${
-                        com.ulgentube.app.util.ErrorMessageSanitizer.sanitize(error, "Bilinmeyen hata")
+                        ErrorMessageSanitizer.sanitize(error, "Bilinmeyen hata")
                     }"
                 }
             )

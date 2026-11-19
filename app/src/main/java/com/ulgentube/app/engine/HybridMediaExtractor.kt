@@ -30,6 +30,15 @@ class HybridMediaExtractor(
         val platform = UrlSanitizer.detectPlatform(cleanUrl)
 
         runCatching {
+            if (platform != PlatformType.DIRECT_IMAGE && YtDlpEngine.isLikelyPlaylistUrl(cleanUrl)) {
+                val playlistMedia = runCatching {
+                    ytDlpEngine.fetchPlaylistInfo(cleanUrl, platform)
+                }.getOrNull()
+                if (playlistMedia != null && playlistMedia.playlistEntries.size >= 2) {
+                    return@runCatching playlistMedia.copy(isPlaylist = true)
+                }
+            }
+
             val extracted = when (platform) {
                 PlatformType.DIRECT_IMAGE -> {
                     socialImageExtractor.extract(cleanUrl, platform)
@@ -158,7 +167,8 @@ class HybridMediaExtractor(
             platform = primary.platform,
             videoFormats = mergedVideos,
             audioFormats = mergedAudio,
-            imageItems = mergedImages
+            imageItems = mergedImages,
+            subtitles = primary.subtitles.ifEmpty { secondary.subtitles }
         )
     }
 

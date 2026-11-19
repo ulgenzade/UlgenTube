@@ -13,14 +13,33 @@ android {
         applicationId = "com.ulgentube.app"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // youtubedl-android yerel (native) ikili dosyaları için desteklenen ABI'ler
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        val enableSplits = (project.findProperty("splitAbis") as? String)?.toBoolean() == true
+        if (!enableSplits) {
+            // youtubedl-android yerel (native) ikili dosyaları için desteklenen ABI'ler
+            // Tek mimari için: ./gradlew assembleDebug -PabiFilter=arm64-v8a
+            val requestedAbis = (project.findProperty("abiFilter") as? String)
+                ?.split(",")
+                ?.map { it.trim() }
+                ?.filter { it.isNotEmpty() }
+                ?: listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            ndk {
+                abiFilters += requestedAbis
+            }
+        }
+    }
+
+    splits {
+        abi {
+            val enableSplits = (project.findProperty("splitAbis") as? String)?.toBoolean() == true
+            isEnable = enableSplits
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            isUniversalApk = true
         }
     }
 
@@ -28,6 +47,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -100,6 +120,10 @@ dependencies {
     implementation(libs.youtubedl.library)
     implementation(libs.youtubedl.ffmpeg)
     implementation(libs.youtubedl.aria2c)
+
+    // AndroidX Media3 (Dahili Ses/Video Oynatıcı)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.session)
 
     // Birim Testleri
     testImplementation(libs.junit)

@@ -86,8 +86,8 @@ flowchart TD
 ### Projeyi Klonlama ve Derleme
 
 ```bash
-git clone https://github.com/ulgenzade/UlgneTube.git
-cd UlgneTube
+git clone https://github.com/ulgenzade/UlgenTube.git
+cd UlgenTube
 ```
 
 `local.properties` dosyasını oluşturup kendi Android SDK yolunuzu ekleyin:

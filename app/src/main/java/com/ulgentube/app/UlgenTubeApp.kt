@@ -194,7 +194,7 @@ class UlgenTubeApp : Application(), ImageLoaderFactory {
 
     companion object {
         private const val TAG = "UlgenTubeApp"
-        private const val ORPHAN_WORK_DIR_GRACE_MS = 30_000L
+        private const val ORPHAN_WORK_DIR_GRACE_MS = 24L * 60L * 60L * 1000L
 
         const val CHANNEL_DOWNLOADS_PROGRESS = "downloads_channel"
         const val CHANNEL_DOWNLOADS_DONE = "downloads_done_channel"

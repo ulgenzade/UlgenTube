@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -23,6 +24,8 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Videocam
@@ -50,6 +53,7 @@ import com.ulgentube.app.domain.model.MediaCategory
 import com.ulgentube.app.ui.theme.CoralPink
 import com.ulgentube.app.ui.theme.ElectricPurple
 import com.ulgentube.app.ui.theme.EmeraldSuccess
+import com.ulgentube.app.ui.theme.UlgenPrimaryGradient
 import com.ulgentube.app.ui.theme.UlgenSubtleGradient
 import com.ulgentube.app.util.FormatUtils
 
@@ -64,15 +68,20 @@ fun DownloadItemCard(
     onDelete: (String) -> Unit,
     onOpen: (DownloadTask) -> Unit,
     onShare: (DownloadTask) -> Unit,
+    isPlayingInMiniPlayer: Boolean = false,
+    onPlayAudio: ((DownloadTask) -> Unit)? = null,
+    onOpenStudio: ((DownloadTask) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isActive = task.status == DownloadStatus.QUEUED ||
         task.status == DownloadStatus.DOWNLOADING ||
         task.status == DownloadStatus.MERGING
 
-    val borderColor = when (task.status) {
-        DownloadStatus.DOWNLOADING, DownloadStatus.MERGING -> ElectricPurple.copy(alpha = 0.45f)
-        DownloadStatus.FAILED -> MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+    val borderColor = when {
+        isPlayingInMiniPlayer -> CoralPink.copy(alpha = 0.65f)
+        task.status == DownloadStatus.DOWNLOADING || task.status == DownloadStatus.MERGING ->
+            ElectricPurple.copy(alpha = 0.45f)
+        task.status == DownloadStatus.FAILED -> MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
         else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
     }
 
@@ -170,6 +179,9 @@ fun DownloadItemCard(
                 task.status == DownloadStatus.COMPLETED -> {
                     CompletedActionsSection(
                         task = task,
+                        isPlayingInMiniPlayer = isPlayingInMiniPlayer,
+                        onPlayAudio = onPlayAudio?.let { cb -> { cb(task) } },
+                        onOpenStudio = onOpenStudio?.let { cb -> { cb(task) } },
                         onOpen = { onOpen(task) },
                         onShare = { onShare(task) },
                         onDelete = { onDelete(task.id) }
@@ -269,6 +281,9 @@ private fun ActiveProgressSection(
 @Composable
 private fun CompletedActionsSection(
     task: DownloadTask,
+    isPlayingInMiniPlayer: Boolean,
+    onPlayAudio: (() -> Unit)?,
+    onOpenStudio: (() -> Unit)?,
     onOpen: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit
@@ -307,6 +322,49 @@ private fun CompletedActionsSection(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Ses kartlarında dahili mini çalarda Çal / Duraklat
+            if (task.category == MediaCategory.AUDIO && onPlayAudio != null) {
+                IconButton(
+                    onClick = onPlayAudio,
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isPlayingInMiniPlayer) {
+                                UlgenPrimaryGradient
+                            } else {
+                                UlgenSubtleGradient
+                            }
+                        )
+                ) {
+                    Icon(
+                        imageVector = if (isPlayingInMiniPlayer) {
+                            Icons.Rounded.Pause
+                        } else {
+                            Icons.Rounded.PlayArrow
+                        },
+                        contentDescription = if (isPlayingInMiniPlayer) "Duraklat" else "Uygulamada Çal",
+                        tint = if (isPlayingInMiniPlayer) Color.White else ElectricPurple,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            // Video kartlarında FFmpeg Stüdyo aksiyonu
+            if (task.category == MediaCategory.VIDEO && onOpenStudio != null) {
+                IconButton(
+                    onClick = onOpenStudio,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoFixHigh,
+                        contentDescription = "FFmpeg Stüdyo",
+                        tint = CoralPink,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
             IconButton(
                 onClick = onOpen,
                 modifier = Modifier.size(36.dp)

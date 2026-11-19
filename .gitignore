@@ -12,6 +12,7 @@ app/build/
 *.dex
 *.class
 *.bin
+releases/
 captures/
 .externalNativeBuild/
 .cxx/

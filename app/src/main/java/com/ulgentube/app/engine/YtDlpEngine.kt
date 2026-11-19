@@ -8,7 +8,10 @@ import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaCategory
 import com.ulgentube.app.domain.model.MediaFormatOption
 import com.ulgentube.app.domain.model.PlatformType
+import com.ulgentube.app.domain.model.PlaylistEntry
+import com.ulgentube.app.domain.model.SubtitleOption
 import com.ulgentube.app.util.FormatUtils
+import com.ulgentube.app.util.NetworkSecurityGuard
 import com.ulgentube.app.util.UrlSanitizer
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -16,21 +19,25 @@ import com.yausername.youtubedl_android.mapper.VideoFormat
 import com.yausername.youtubedl_android.mapper.VideoInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.util.Locale
 
 /**
  * Motor 1: youtubedl-android (yt-dlp + FFmpeg + aria2c) tabanlı video ve ses ayrıştırma/indirme motoru.
- * 1800+ web sitesinden gerçek akış özelliklerini (çözünürlük, FPS, HDR/10-bit, yüksek bitrate, kodek)
- * birebir format ID'leri ile analiz eder, gerektiğinde FFmpeg ile ölçekleme ve ses dönüştürme yapar.
+ * 1800+ web sitesinden gerçek akış özelliklerini (çözünürlük, FPS, HDR/10-bit, yüksek bitrate, kodek,
+ * altyazı ve oynatma listeleri) birebir format ID'leri ile analiz eder; gerektiğinde FFmpeg ile
+ * ölçekleme, ses dönüştürme, kırpma (clip), SponsorBlock ve bölüm/altyazı gömme yapar.
  */
 class YtDlpEngine(
-    private val isAria2cReady: () -> Boolean = { false }
+    private val isAria2cReady: () -> Boolean = { false },
+    private val cookieRepository: CookieRepository? = null
 ) {
 
     /**
-     * Verilen URL için video/ses metadata ve gerçek akışlardan türetilen format seçeneklerini getirir.
+     * Verilen URL için video/ses metadata, altyazı listesi ve gerçek akışlardan türetilen
+     * format seçeneklerini getirir.
      */
     suspend fun fetchMediaInfo(
         url: String,
@@ -53,11 +60,12 @@ class YtDlpEngine(
         val author = info.uploader?.takeIf { it.isNotBlank() }
         val durationSeconds = info.duration.takeIf { it > 0 }?.toLong()
         val thumbnailUrl = info.thumbnail
-            ?.takeIf { it.isNotBlank() && com.ulgentube.app.util.NetworkSecurityGuard.isSafePublicUrl(it) }
+            ?.takeIf { it.isNotBlank() && NetworkSecurityGuard.isSafePublicUrl(it) }
 
         val rawFormats = info.formats.orEmpty()
         val videoFormats = buildRealVideoFormats(rawFormats, platform)
         val audioFormats = buildDefaultAudioFormats(rawFormats, durationSeconds)
+        val subtitles = extractSubtitles(info)
 
         val imageItems = buildList {
             if (!thumbnailUrl.isNullOrBlank()) {
@@ -81,12 +89,98 @@ class YtDlpEngine(
             platform = platform,
             videoFormats = videoFormats,
             audioFormats = audioFormats,
-            imageItems = imageItems
+            imageItems = imageItems,
+            subtitles = subtitles
         )
     }
 
     /**
-     * Seçilen görevi geçici klasöre indirir; ses çıkarma veya FFmpeg çözünürlük küçültme varsa uygular.
+     * Oynatma listesi (playlist / set) bağlantısını `--flat-playlist --dump-single-json` ile
+     * hızlıca çözümler ve en fazla 100 güvenli [PlaylistEntry] döndürür.
+     * Geçerli bir playlist değilse veya 2'den az öğe içeriyorsa `null` döner.
+     */
+    suspend fun fetchPlaylistInfo(
+        url: String,
+        platform: PlatformType
+    ): ExtractedMedia? = withContext(Dispatchers.IO) {
+        val safeUrl = UrlSanitizer.extractFirstValidUrl(url) ?: return@withContext null
+        if (!isLikelyPlaylistUrl(safeUrl)) return@withContext null
+
+        val request = YoutubeDLRequest(safeUrl).apply {
+            addOption("--flat-playlist")
+            addOption("--dump-single-json")
+            addOption("--no-warnings")
+            addOption("--proto", "http,https")
+            addOption("--socket-timeout", "20")
+            addOption("--playlist-end", MAX_PLAYLIST_ENTRIES.toString())
+        }
+
+        val response = YoutubeDL.getInstance().execute(request)
+        val rawJson = response.out?.trim().orEmpty()
+        if (rawJson.isBlank()) return@withContext null
+
+        val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return@withContext null
+        val entriesArray = root.optJSONArray("entries") ?: return@withContext null
+        if (entriesArray.length() < 2) return@withContext null
+
+        val playlistTitle = root.optString("title").takeIf { it.isNotBlank() } ?: "Oynatma Listesi"
+        val playlistAuthor = root.optString("uploader").takeIf { it.isNotBlank() }
+            ?: root.optString("channel").takeIf { it.isNotBlank() }
+
+        val entries = buildList {
+            val limit = minOf(entriesArray.length(), MAX_PLAYLIST_ENTRIES)
+            for (i in 0 until limit) {
+                val obj = entriesArray.optJSONObject(i) ?: continue
+                val entryId = obj.optString("id").takeIf { it.isNotBlank() } ?: "item_${i + 1}"
+                val candidateUrl = resolvePlaylistEntryUrl(obj, entryId, platform) ?: continue
+                if (!NetworkSecurityGuard.isSafePublicUrl(candidateUrl)) continue
+
+                val entryTitle = obj.optString("title")
+                    .takeIf { it.isNotBlank() && it != "[Deleted video]" && it != "[Private video]" }
+                    ?: "Video ${i + 1}"
+                val entryAuthor = obj.optString("uploader").takeIf { it.isNotBlank() }
+                    ?: obj.optString("channel").takeIf { it.isNotBlank() }
+                    ?: playlistAuthor
+                val entryDuration = obj.optDouble("duration", -1.0)
+                    .takeIf { !it.isNaN() && it > 0.0 }
+                    ?.toLong()
+                val entryThumb = extractSafeJsonThumbnail(obj)
+
+                add(
+                    PlaylistEntry(
+                        id = entryId,
+                        url = candidateUrl,
+                        title = entryTitle,
+                        author = entryAuthor,
+                        durationSeconds = entryDuration,
+                        thumbnailUrl = entryThumb
+                    )
+                )
+            }
+        }
+
+        if (entries.size < 2) return@withContext null
+
+        val playlistThumb = extractSafeJsonThumbnail(root) ?: entries.firstOrNull()?.thumbnailUrl
+
+        ExtractedMedia(
+            originalUrl = safeUrl,
+            title = playlistTitle,
+            author = playlistAuthor,
+            durationSeconds = null,
+            thumbnailUrl = playlistThumb,
+            platform = platform,
+            videoFormats = emptyList(),
+            audioFormats = emptyList(),
+            imageItems = emptyList(),
+            isPlaylist = true,
+            playlistEntries = entries
+        )
+    }
+
+    /**
+     * Seçilen görevi geçici klasöre indirir; ses çıkarma, FFmpeg çözünürlük küçültme,
+     * çerezler, SponsorBlock, bölümler, zaman aralığı kırpma, altyazı ve resume desteği uygular.
      */
     suspend fun download(
         task: DownloadTask,
@@ -103,12 +197,47 @@ class YtDlpEngine(
         val sourceUrl = UrlSanitizer.extractFirstValidUrl(rawSourceUrl)
             ?: throw IllegalArgumentException("Geçersiz veya güvensiz indirme bağlantısı.")
 
+        val hasClipRange = task.clipStartSeconds != null || task.clipEndSeconds != null
+
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--newline")
+            addOption("--continue")
             addOption("--proto", "http,https")
             addOption("-o", outputTemplate)
+
+            if (settings.cookiesEnabled) {
+                cookieRepository?.getCookieFile()?.let { cookieFile ->
+                    addOption("--cookies", cookieFile.absolutePath)
+                }
+            }
+
+            if (settings.sponsorBlockEnabled && task.platform == PlatformType.YOUTUBE) {
+                addOption("--sponsorblock-remove", "sponsor,intro,outro,selfpromo")
+            }
+
+            if (settings.embedChapters) {
+                addOption("--embed-chapters")
+            }
+
+            if (hasClipRange) {
+                val start = (task.clipStartSeconds ?: 0L).coerceAtLeast(0L)
+                val endPart = task.clipEndSeconds?.takeIf { it > start }?.toString() ?: "inf"
+                addOption("--download-sections", "*$start-$endPart")
+                addOption("--force-keyframes-at-cuts")
+            }
+
+            val safeSubLang = task.subtitleLang?.trim()?.takeIf { SAFE_SUBTITLE_LANG_REGEX.matches(it) }
+            if (safeSubLang != null) {
+                addOption("--write-subs")
+                addOption("--write-auto-subs")
+                addOption("--sub-langs", safeSubLang)
+                addOption("--sub-format", "srt/best")
+                if (task.embedSubtitles) {
+                    addOption("--embed-subs")
+                }
+            }
 
             if (task.isAudioExtraction || task.category == MediaCategory.AUDIO) {
                 val targetAudioFormat = task.targetExtension.lowercase(Locale.ROOT)
@@ -151,9 +280,9 @@ class YtDlpEngine(
                 }
             }
 
-            if (settings.useAria2c && isAria2cReady()) {
+            if (settings.useAria2c && isAria2cReady() && !hasClipRange) {
                 addOption("--downloader", "libaria2c.so")
-                addOption("--external-downloader-args", "aria2c:-x 8 -k 1M")
+                addOption("--external-downloader-args", "aria2c:-x 8 -k 1M -c")
             }
         }
 
@@ -191,6 +320,155 @@ class YtDlpEngine(
                 null -> "Güncelleme durumu alınamadı."
             }
         }
+    }
+
+    /**
+     * [VideoInfo] nesnesindeki manuel (`subtitles`) ve otomatik (`automaticCaptions`) altyazı
+     * haritalarını güvenli şekilde okuyup öncelikli (tr, en, diğerleri — max 12 dil) listeler.
+     */
+    private fun extractSubtitles(info: VideoInfo): List<SubtitleOption> {
+        val manualMap = readSubtitleMapSafely(info, "getSubtitles", "subtitles")
+        val autoMap = readSubtitleMapSafely(info, "getAutomaticCaptions", "automaticCaptions")
+
+        if (manualMap.isEmpty() && autoMap.isEmpty()) return emptyList()
+
+        val collected = LinkedHashMap<String, SubtitleOption>()
+
+        manualMap.keys.forEach { rawKey ->
+            val langCode = rawKey.trim()
+            if (SAFE_SUBTITLE_LANG_REGEX.matches(langCode) && langCode != "live_chat") {
+                collected[langCode.lowercase(Locale.ROOT)] = SubtitleOption(
+                    langCode = langCode,
+                    label = resolveTurkishLanguageLabel(langCode),
+                    isAutoGenerated = false
+                )
+            }
+        }
+
+        autoMap.keys.forEach { rawKey ->
+            val langCode = rawKey.trim()
+            val normalizedKey = langCode.lowercase(Locale.ROOT)
+            if (SAFE_SUBTITLE_LANG_REGEX.matches(langCode) &&
+                langCode != "live_chat" &&
+                !collected.containsKey(normalizedKey)
+            ) {
+                collected[normalizedKey] = SubtitleOption(
+                    langCode = langCode,
+                    label = resolveTurkishLanguageLabel(langCode),
+                    isAutoGenerated = true
+                )
+            }
+        }
+
+        return collected.values
+            .sortedWith(
+                compareBy<SubtitleOption> { subtitleLanguagePriority(it.langCode) }
+                    .thenBy { if (it.isAutoGenerated) 1 else 0 }
+                    .thenBy { it.label.lowercase(Locale("tr", "TR")) }
+            )
+            .take(MAX_SUBTITLE_OPTIONS)
+    }
+
+    private fun readSubtitleMapSafely(
+        info: VideoInfo,
+        getterName: String,
+        fieldName: String
+    ): Map<String, Any?> {
+        val fromGetter = runCatching {
+            val method = info.javaClass.getMethod(getterName)
+            @Suppress("UNCHECKED_CAST")
+            (method.invoke(info) as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) -> (k as? String)?.let { it to v } }
+                ?.toMap()
+        }.getOrNull()
+
+        if (!fromGetter.isNullOrEmpty()) return fromGetter
+
+        return runCatching {
+            val field = info.javaClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            (field.get(info) as? Map<*, *>)
+                ?.entries
+                ?.mapNotNull { (k, v) -> (k as? String)?.let { it to v } }
+                ?.toMap()
+                .orEmpty()
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun subtitleLanguagePriority(langCode: String): Int {
+        val base = langCode.lowercase(Locale.ROOT).substringBefore('-').substringBefore('_')
+        return when (base) {
+            "tr" -> 0
+            "en" -> 1
+            "de" -> 2
+            "fr" -> 3
+            "es" -> 4
+            "ar" -> 5
+            "ru" -> 6
+            "ja" -> 7
+            "ko" -> 8
+            else -> 10
+        }
+    }
+
+    private fun resolveTurkishLanguageLabel(langCode: String): String {
+        val normalized = langCode.lowercase(Locale.ROOT)
+        val base = normalized.substringBefore('-').substringBefore('_')
+        val known = LANGUAGE_LABELS_TR[base]
+        if (known != null) {
+            return if (normalized != base && normalized.length <= 10) {
+                "$known ($langCode)"
+            } else {
+                known
+            }
+        }
+        val localeName = runCatching {
+            Locale.forLanguageTag(langCode.replace('_', '-'))
+                .getDisplayLanguage(Locale("tr", "TR"))
+                .replaceFirstChar { ch ->
+                    if (ch.isLowerCase()) ch.titlecase(Locale("tr", "TR")) else ch.toString()
+                }
+        }.getOrNull()
+        return localeName?.takeIf { it.isNotBlank() && !it.equals(langCode, ignoreCase = true) }
+            ?: langCode.uppercase(Locale.ROOT)
+    }
+
+    private fun resolvePlaylistEntryUrl(
+        entryObj: JSONObject,
+        entryId: String,
+        platform: PlatformType
+    ): String? {
+        val rawWebpage = entryObj.optString("webpage_url").takeIf { it.startsWith("http", ignoreCase = true) }
+        if (rawWebpage != null) return UrlSanitizer.extractFirstValidUrl(rawWebpage)
+
+        val rawUrl = entryObj.optString("url").takeIf { it.isNotBlank() }
+        if (rawUrl != null && rawUrl.startsWith("http", ignoreCase = true)) {
+            return UrlSanitizer.extractFirstValidUrl(rawUrl)
+        }
+
+        if (platform == PlatformType.YOUTUBE && SAFE_FORMAT_ID_REGEX.matches(entryId)) {
+            return "https://www.youtube.com/watch?v=$entryId"
+        }
+
+        return null
+    }
+
+    private fun extractSafeJsonThumbnail(obj: JSONObject): String? {
+        val direct = obj.optString("thumbnail").takeIf {
+            it.isNotBlank() && NetworkSecurityGuard.isSafePublicUrl(it)
+        }
+        if (direct != null) return direct
+
+        val thumbs = obj.optJSONArray("thumbnails") ?: return null
+        for (i in thumbs.length() - 1 downTo 0) {
+            val url = thumbs.optJSONObject(i)?.optString("url")
+            if (!url.isNullOrBlank() && NetworkSecurityGuard.isSafePublicUrl(url)) {
+                return url
+            }
+        }
+        return null
     }
 
     /**
@@ -479,14 +757,15 @@ class YtDlpEngine(
                     !file.name.endsWith(".part", ignoreCase = true) &&
                     !file.name.endsWith(".ytdl", ignoreCase = true) &&
                     !file.name.endsWith(".tmp", ignoreCase = true) &&
-                    !file.name.endsWith(".temp", ignoreCase = true)
+                    !file.name.endsWith(".temp", ignoreCase = true) &&
+                    !file.name.endsWith(".aria2", ignoreCase = true)
             }
             .orEmpty()
 
-        val nonImage = candidates.filterNot {
-            it.extension.lowercase(Locale.ROOT) in setOf("webp", "jpg", "jpeg", "png")
+        val primaryMedia = candidates.filterNot {
+            it.extension.lowercase(Locale.ROOT) in SIDECAR_EXTENSIONS
         }
-        return (nonImage.ifEmpty { candidates }).maxByOrNull { it.length() }
+        return (primaryMedia.ifEmpty { candidates }).maxByOrNull { it.length() }
     }
 
     private data class ParsedVideoStream(
@@ -513,14 +792,41 @@ class YtDlpEngine(
 
     companion object {
         private const val HIGH_BITRATE_MULTIPLIER = 1.6
+        private const val MAX_PLAYLIST_ENTRIES = 100
+        private const val MAX_SUBTITLE_OPTIONS = 12
 
         private val SAFE_FORMAT_ID_REGEX = Regex("""^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$""")
         private val SAFE_FORMAT_SELECTOR_REGEX = Regex("""^[a-zA-Z0-9._+\-/\[\]=]{1,200}$""")
+        private val SAFE_SUBTITLE_LANG_REGEX = Regex("""^[a-zA-Z0-9,_-]{2,32}$""")
         private val ALLOWED_TRANSCODE_HEIGHTS = setOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
         private val SPEED_REGEX = Regex("""\b\d+(?:\.\d+)?\s*[KMG]i?B/s\b""", RegexOption.IGNORE_CASE)
         private val SUPPORTED_AUDIO_FORMATS = setOf("mp3", "m4a", "opus", "flac", "wav")
+        private val SIDECAR_EXTENSIONS = setOf("webp", "jpg", "jpeg", "png", "srt", "vtt", "ass", "lrc", "json", "description")
         private val HDR_KEYWORDS = listOf("hdr", "10bit", "10-bit", "premium", "enhanced", "high")
         private val DOWNSCALE_STEPS = listOf(720, 480, 360)
+
+        private val LANGUAGE_LABELS_TR = mapOf(
+            "tr" to "Türkçe",
+            "en" to "İngilizce",
+            "de" to "Almanca",
+            "fr" to "Fransızca",
+            "es" to "İspanyolca",
+            "ar" to "Arapça",
+            "ru" to "Rusça",
+            "ja" to "Japonca",
+            "ko" to "Korece"
+        )
+
+        /**
+         * Verilen URL'nin oynatma listesi (YouTube playlist, SoundCloud sets vb.)
+         * olma olasılığını kontrol eder.
+         */
+        fun isLikelyPlaylistUrl(url: String): Boolean {
+            val lower = url.lowercase(Locale.ROOT)
+            return lower.contains("list=") ||
+                lower.contains("/playlist") ||
+                lower.contains("/sets/")
+        }
 
         /**
          * Orijinal akıştan kesinlikle daha düşük çözünürlüklü FFmpeg ölçekleme seçeneklerini üretir.

@@ -33,14 +33,23 @@ object UrlSanitizer {
      * Geçerli bir URL bulunamazsa veya zararlı şema tespit edilirse `null` döner.
      */
     fun extractFirstValidUrl(rawText: String?): String? {
-        if (rawText.isNullOrBlank()) return null
+        return extractAllValidUrls(rawText).firstOrNull()
+    }
+
+    /**
+     * Ham metin içindeki tüm geçerli, benzersiz ve güvenli `http://` / `https://` URL'lerini
+     * metindeki sırasını koruyarak döndürür. Zararlı şemaları ve yerel/özel ağ adreslerini reddeder.
+     */
+    fun extractAllValidUrls(rawText: String?): List<String> {
+        if (rawText.isNullOrBlank()) return emptyList()
 
         val trimmed = rawText.trim()
         val lower = trimmed.lowercase(Locale.ROOT)
         if (BLOCKED_SCHEMES.any { lower.startsWith(it) }) {
-            return null
+            return emptyList()
         }
 
+        val validUrls = LinkedHashSet<String>()
         for (match in URL_REGEX.findAll(trimmed)) {
             if (isEmbeddedInBlockedScheme(trimmed, match.range.first)) {
                 continue
@@ -61,11 +70,11 @@ object UrlSanitizer {
             }.getOrNull()
 
             if (validated != null) {
-                return validated
+                validUrls.add(validated)
             }
         }
 
-        return null
+        return validUrls.toList()
     }
 
     private fun isEmbeddedInBlockedScheme(text: String, matchStart: Int): Boolean {
