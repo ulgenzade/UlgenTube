@@ -799,6 +799,41 @@ class SocialImageExtractor(
             }
         }
 
+        // 4c) oembed içindeki Redgifs linkini de kontrol et
+        if (videos.isEmpty()) {
+            val oembedObj = sourcePost.optJSONObject("secure_media")?.optJSONObject("oembed")
+                ?: sourcePost.optJSONObject("media")?.optJSONObject("oembed")
+            val oembedHtml = oembedObj?.optString("html").orEmpty()
+            val oembedRedgifs = Regex("""https?://[^\s"'<>]*redgifs\.com/(?:watch|ifr)/[A-Za-z0-9_-]+""", RegexOption.IGNORE_CASE)
+                .find(oembedHtml)?.value
+            if (!oembedRedgifs.isNullOrBlank()) {
+                val redgifsMp4 = runCatching { extractRedgifsMp4Url(oembedRedgifs) }.getOrNull()
+                if (!redgifsMp4.isNullOrBlank() && seenUrls.add(redgifsMp4)) {
+                    videos += MediaFormatOption(
+                        id = "reddit_oembed_redgifs_mp4",
+                        label = "HD Video (Redgifs MP4)",
+                        sublabel = "MP4 • Doğrudan",
+                        category = MediaCategory.VIDEO,
+                        extension = "mp4",
+                        directUrl = redgifsMp4
+                    )
+                }
+            }
+        }
+
+        // Eğer gönderi video/GIF olarak işaretliyse ama video URL çıkarılamadıysa,
+        // sadece önizleme JPG'sini "saf resim gönderisi" gibi döndürme (yt-dlp'ye düşsün!)
+        val postHint = sourcePost.optString("post_hint").lowercase(Locale.ROOT)
+        val domain = sourcePost.optString("domain").lowercase(Locale.ROOT)
+        val isVideoPost = sourcePost.optBoolean("is_video", false) ||
+            postHint.contains("video") ||
+            domain.contains("v.redd.it") ||
+            domain.contains("redgifs.com") ||
+            domain.contains("gfycat.com")
+        if (isVideoPost && videos.isEmpty()) {
+            images.clear()
+        }
+
         return durationSeconds
     }
 
