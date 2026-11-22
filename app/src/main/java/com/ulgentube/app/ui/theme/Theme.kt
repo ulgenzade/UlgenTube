@@ -18,16 +18,16 @@ import com.ulgentube.app.domain.model.ThemeMode
 private val UlgenDarkColorScheme = darkColorScheme(
     primary = ElectricPurple,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFF2B1B5A),
-    onPrimaryContainer = Color(0xFFEADDFF),
-    secondary = CoralPink,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFF4A162D),
-    onSecondaryContainer = Color(0xFFFFD9E4),
+    primaryContainer = Color(0xFF2E121A),
+    onPrimaryContainer = Color(0xFFFFD9E0),
+    secondary = Color(0xFF94A3B8),
+    onSecondary = Color(0xFF09090B),
+    secondaryContainer = DarkSurfaceContainerHigh,
+    onSecondaryContainer = DarkOnSurface,
     tertiary = CyanAccent,
-    onTertiary = Color(0xFF00363D),
-    tertiaryContainer = Color(0xFF004F58),
-    onTertiaryContainer = Color(0xFF97F0FF),
+    onTertiary = Color(0xFF082F49),
+    tertiaryContainer = Color(0xFF0C4A6E),
+    onTertiaryContainer = Color(0xFFE0F2FE),
     background = DarkBackground,
     onBackground = DarkOnSurface,
     surface = DarkSurface,
@@ -43,23 +43,23 @@ private val UlgenDarkColorScheme = darkColorScheme(
     outlineVariant = DarkOutlineVariant,
     error = CrimsonError,
     onError = Color.White,
-    errorContainer = Color(0xFF4A151B),
-    onErrorContainer = Color(0xFFFFDAD6)
+    errorContainer = Color(0xFF3B1518),
+    onErrorContainer = Color(0xFFFECACA)
 )
 
 private val UlgenLightColorScheme = lightColorScheme(
     primary = ElectricPurple,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFEDE7FF),
-    onPrimaryContainer = Color(0xFF280A6B),
-    secondary = CoralPink,
+    primaryContainer = Color(0xFFFFE4E6),
+    onPrimaryContainer = Color(0xFF881337),
+    secondary = Color(0xFF475569),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFFFE1EC),
-    onSecondaryContainer = Color(0xFF5C0B2D),
-    tertiary = Color(0xFF00838F),
+    secondaryContainer = Color(0xFFF1F5F9),
+    onSecondaryContainer = Color(0xFF0F172A),
+    tertiary = Color(0xFF0284C7),
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFD0F6FA),
-    onTertiaryContainer = Color(0xFF00363D),
+    tertiaryContainer = Color(0xFFE0F2FE),
+    onTertiaryContainer = Color(0xFF0C4A6E),
     background = LightBackground,
     onBackground = LightOnSurface,
     surface = LightSurface,
@@ -81,10 +81,10 @@ private val UlgenLightColorScheme = lightColorScheme(
 
 val UlgenShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
-    small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(18.dp),
-    large = RoundedCornerShape(22.dp),
-    extraLarge = RoundedCornerShape(28.dp)
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp)
 )
 
 @Composable
@@ -106,11 +106,20 @@ fun UlgenTubeTheme(
                 dynamicDarkColorScheme(context).copy(
                     background = DarkBackground,
                     surface = DarkSurface,
+                    surfaceContainerLowest = DarkBackground,
+                    surfaceContainerLow = DarkSurfaceContainerLow,
                     surfaceContainer = DarkSurfaceContainer,
-                    surfaceContainerHigh = DarkSurfaceContainerHigh
+                    surfaceContainerHigh = DarkSurfaceContainerHigh,
+                    surfaceContainerHighest = DarkSurfaceContainerHighest,
+                    outlineVariant = DarkOutlineVariant
                 )
             } else {
-                dynamicLightColorScheme(context)
+                dynamicLightColorScheme(context).copy(
+                    background = LightBackground,
+                    surface = LightSurface,
+                    surfaceContainerLow = LightSurfaceContainerLow,
+                    outlineVariant = LightOutlineVariant
+                )
             }
         }
 

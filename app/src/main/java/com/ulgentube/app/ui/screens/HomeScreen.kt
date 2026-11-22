@@ -29,16 +29,21 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentPaste
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.MusicNote
+import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Subscriptions
 import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,6 +54,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -77,6 +83,7 @@ import com.ulgentube.app.EngineInitState
 import com.ulgentube.app.R
 import com.ulgentube.app.domain.model.AppSettings
 import com.ulgentube.app.domain.model.DownloadTask
+import com.ulgentube.app.domain.model.FollowedChannel
 import com.ulgentube.app.domain.model.PlatformType
 import com.ulgentube.app.player.MiniPlayerState
 import com.ulgentube.app.ui.components.DownloadItemCard
@@ -120,6 +127,15 @@ fun HomeScreen(
     onRetryDownload: (String) -> Unit,
     onDeleteDownload: (String, Boolean) -> Unit,
     onPlayAudio: (DownloadTask) -> Unit,
+    onPreviewMedia: (DownloadTask) -> Unit,
+    followedChannels: List<FollowedChannel> = emptyList(),
+    isCheckingChannels: Boolean = false,
+    onFollowChannel: (String, Boolean) -> Unit = { _, _ -> },
+    onUnfollowChannel: (String) -> Unit = {},
+    onToggleChannelAutoDownload: (String, Boolean) -> Unit = { _, _ -> },
+    onCheckFollowedChannels: () -> Unit = {},
+    onToggleFavorite: ((String) -> Unit)? = null,
+    onToggleVault: ((String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -129,6 +145,7 @@ fun HomeScreen(
     var detectedClipboardUrl by remember { mutableStateOf<String?>(null) }
     var dismissedClipboardUrl by remember { mutableStateOf<String?>(null) }
     var pendingDeleteTaskId by remember { mutableStateOf<String?>(null) }
+    var showFollowChannelDialog by remember { mutableStateOf(false) }
 
     val extractedBatchUrls = remember(urlInput) {
         UrlSanitizer.extractAllValidUrls(urlInput)
@@ -161,12 +178,14 @@ fun HomeScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val recentDownloads = remember(downloads) { downloads.take(3) }
+    val recentDownloads = remember(downloads) {
+        downloads.filter { !it.isInVault }.take(3)
+    }
 
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         // Üst Marka Başlığı & Motor Durumu
         item(key = "header") {
@@ -246,6 +265,28 @@ fun HomeScreen(
             }
         }
 
+        // Takip Edilen Kanallar Bölümü
+        item(key = "followed_channels_section") {
+            FollowedChannelsCard(
+                channels = followedChannels,
+                isChecking = isCheckingChannels,
+                onAddClick = { showFollowChannelDialog = true },
+                onCheckNow = onCheckFollowedChannels,
+                onToggleAutoDownload = onToggleChannelAutoDownload,
+                onUnfollow = onUnfollowChannel,
+                onAnalyzeLatest = { channel ->
+                    val targetUrl = if (!channel.lastKnownVideoId.isNullOrBlank() &&
+                        channel.platform == PlatformType.YOUTUBE
+                    ) {
+                        "https://www.youtube.com/watch?v=${channel.lastKnownVideoId}"
+                    } else {
+                        channel.url
+                    }
+                    onAnalyzeUrl(targetUrl)
+                }
+            )
+        }
+
         // Nasıl Kullanılır İpucu Kartı
         item(key = "how_to_use") {
             HowToUseTipCard()
@@ -288,7 +329,10 @@ fun HomeScreen(
                     onOpen = { openDownloadedFile(context, it) },
                     onShare = { shareDownloadedFile(context, it) },
                     isPlayingInMiniPlayer = isPlayingHere,
-                    onPlayAudio = onPlayAudio
+                    onPlayAudio = onPlayAudio,
+                    onPreviewMedia = onPreviewMedia,
+                    onToggleFavorite = onToggleFavorite,
+                    onToggleVault = onToggleVault
                 )
             }
         }
@@ -310,6 +354,16 @@ fun HomeScreen(
                 onDeleteDownload(targetDeleteId, false)
             },
             onDismiss = { pendingDeleteTaskId = null }
+        )
+    }
+
+    if (showFollowChannelDialog) {
+        FollowChannelDialog(
+            onConfirm = { input, autoDownload ->
+                showFollowChannelDialog = false
+                onFollowChannel(input, autoDownload)
+            },
+            onDismiss = { showFollowChannelDialog = false }
         )
     }
 }
@@ -341,24 +395,14 @@ private fun HomeBrandHeader(
                 Text(
                     text = "UlgenTube",
                     style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoAwesome,
-                        contentDescription = null,
-                        tint = CoralPink,
-                        modifier = Modifier.size(13.dp)
-                    )
-                    Text(
-                        text = "Reklamsız • Sınırsız",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                Text(
+                    text = "Reklamsız medya indirici",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
 
@@ -465,89 +509,82 @@ private fun ClipboardDetectedCard(
     val platform = remember(url) { UrlSanitizer.detectPlatform(url) }
 
     Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.45f))
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(UlgenCardHighlightGradient)
-                .padding(14.dp)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Bolt,
-                            contentDescription = null,
-                            tint = CoralPink,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = "Panoda bağlantı algılandı",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(26.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Close,
-                            contentDescription = "Kapat",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(17.dp)
-                        )
-                    }
-                }
-
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    PlatformBadge(platform = platform)
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp)
+                    )
                     Text(
-                        text = url,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        text = "Panoda bağlantı algılandı",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-
-                Button(
-                    onClick = onAnalyze,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(42.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                    contentPadding = PaddingValues()
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(UlgenPrimaryGradient, RoundedCornerShape(14.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "Tek Tıkla Analiz Et",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Kapat",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(17.dp)
+                    )
                 }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PlatformBadge(platform = platform)
+                Text(
+                    text = url,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Button(
+                onClick = onAnalyze,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(42.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
+                )
+            ) {
+                Text(
+                    text = "Tek Tıkla Analiz Et",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }
@@ -564,9 +601,9 @@ private fun UrlInputHeroCard(
     onBatchDownload: (Boolean) -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f))
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             modifier = Modifier
@@ -577,6 +614,7 @@ private fun UrlInputHeroCard(
             Text(
                 text = "Video, Müzik veya Fotoğraf İndir",
                 style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface
             )
 
@@ -594,7 +632,7 @@ private fun UrlInputHeroCard(
                     Icon(
                         imageVector = Icons.Rounded.Link,
                         contentDescription = null,
-                        tint = ElectricPurple
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
                 trailingIcon = {
@@ -619,14 +657,14 @@ private fun UrlInputHeroCard(
                     }
                 },
                 maxLines = 3,
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(14.dp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = { onAnalyze() }),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = ElectricPurple,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
                     unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
-                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainer
                 )
             )
 
@@ -637,21 +675,20 @@ private fun UrlInputHeroCard(
                 exit = fadeOut() + shrinkVertically()
             ) {
                 Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.45f))
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(UlgenCardHighlightGradient)
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         Text(
                             text = "${batchUrls.size} Bağlantıyı Toplu İndir (Video / MP3)",
                             style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
+                            fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Row(
@@ -663,34 +700,24 @@ private fun UrlInputHeroCard(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(42.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
-                                contentPadding = PaddingValues()
+                                shape = RoundedCornerShape(10.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                ),
+                                contentPadding = PaddingValues(horizontal = 8.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(UlgenPrimaryGradient, RoundedCornerShape(12.dp)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Rounded.Videocam,
-                                            contentDescription = null,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Text(
-                                            text = "Toplu Video",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Color.White
-                                        )
-                                    }
-                                }
+                                Icon(
+                                    imageVector = Icons.Rounded.Videocam,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.size(5.dp))
+                                Text(
+                                    text = "Toplu Video",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             }
 
                             OutlinedButton(
@@ -698,21 +725,22 @@ private fun UrlInputHeroCard(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(42.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, ElectricPurple.copy(alpha = 0.55f)),
+                                shape = RoundedCornerShape(10.dp),
+                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outline),
                                 contentPadding = PaddingValues(horizontal = 8.dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.MusicNote,
                                     contentDescription = null,
-                                    tint = CoralPink,
+                                    tint = MaterialTheme.colorScheme.primary,
                                     modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(modifier = Modifier.size(5.dp))
                                 Text(
                                     text = "Toplu MP3",
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
@@ -725,49 +753,243 @@ private fun UrlInputHeroCard(
                 enabled = urlInput.isNotBlank(),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
+                    .height(48.dp),
+                shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.Transparent,
-                    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest
-                ),
-                contentPadding = PaddingValues()
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .then(
-                            if (urlInput.isNotBlank()) {
-                                Modifier.background(UlgenPrimaryGradient, RoundedCornerShape(16.dp))
-                            } else {
-                                Modifier
-                            }
-                        ),
-                    contentAlignment = Alignment.Center
+                Icon(
+                    imageVector = Icons.Rounded.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(19.dp)
+                )
+                Spacer(modifier = Modifier.size(8.dp))
+                Text(
+                    text = "Analiz Et & İndir",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun FollowedChannelsCard(
+    channels: List<FollowedChannel>,
+    isChecking: Boolean,
+    onAddClick: () -> Unit,
+    onCheckNow: () -> Unit,
+    onToggleAutoDownload: (String, Boolean) -> Unit,
+    onUnfollow: (String) -> Unit,
+    onAnalyzeLatest: (FollowedChannel) -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Icon(
+                        imageVector = Icons.Rounded.Subscriptions,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(19.dp)
+                    )
+                    Text(
+                        text = "Takip Edilen Kanallar",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (channels.isNotEmpty()) {
+                        TextButton(
+                            onClick = { if (!isChecking) onCheckNow() },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            if (isChecking) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.size(4.dp))
+                            Text(
+                                text = "Kontrol Et",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = onAddClick,
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Download,
-                            contentDescription = null,
-                            tint = if (urlInput.isNotBlank()) {
-                                Color.White
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Add,
+                                contentDescription = "Kanal Ekle",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Text(
+                                text = "Ekle",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (channels.isEmpty()) {
+                Text(
+                    text = "Sevdiğiniz YouTube kanallarını (@kullanici veya URL) ekleyin; yeni videoları tek tıkla kontrol edin veya otomatik indirin.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    channels.forEach { channel ->
+                        Surface(
+                            shape = RoundedCornerShape(15.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
+                                            PlatformBadge(platform = channel.platform)
+                                            Text(
+                                                text = channel.title,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        if (!channel.lastKnownVideoTitle.isNullOrBlank()) {
+                                            Spacer(modifier = Modifier.height(3.dp))
+                                            Text(
+                                                text = "Son: ${channel.lastKnownVideoTitle}",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+
+                                    IconButton(
+                                        onClick = { onUnfollow(channel.channelId) },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteOutline,
+                                            contentDescription = "Takipten Çık",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(
+                                            text = "Oto-İndir",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Switch(
+                                            checked = channel.autoDownloadLatest,
+                                            onCheckedChange = { enabled ->
+                                                onToggleAutoDownload(channel.channelId, enabled)
+                                            }
+                                        )
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { onAnalyzeLatest(channel) },
+                                        shape = RoundedCornerShape(10.dp),
+                                        border = BorderStroke(1.dp, CoralPink.copy(alpha = 0.55f)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.PlayCircleOutline,
+                                            contentDescription = null,
+                                            tint = CoralPink,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.size(5.dp))
+                                        Text(
+                                            text = "Son Videoyu Analiz Et",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
                             }
-                        )
-                        Text(
-                            text = "Analiz Et & İndir",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (urlInput.isNotBlank()) {
-                                Color.White
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            }
-                        )
+                        }
                     }
                 }
             }
@@ -776,11 +998,91 @@ private fun UrlInputHeroCard(
 }
 
 @Composable
+private fun FollowChannelDialog(
+    onConfirm: (String, Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var input by remember { mutableStateOf("") }
+    var autoDownload by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                imageVector = Icons.Rounded.Subscriptions,
+                contentDescription = null,
+                tint = ElectricPurple,
+                modifier = Modifier.size(26.dp)
+            )
+        },
+        title = {
+            Text(
+                text = "Kanal Takip Et",
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    text = "YouTube kanal bağlantısı veya @kullanıcı adını girin.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    placeholder = { Text("@kanaladi veya https://youtube.com/...") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Yeni Videoları Oto-İndir",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            text = "Kontrolde yeni video bulunursa kuyruğa ekler",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = autoDownload,
+                        onCheckedChange = { autoDownload = it }
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (input.isNotBlank()) onConfirm(input.trim(), autoDownload) },
+                enabled = input.isNotBlank(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = ElectricPurple)
+            ) {
+                Text("Takip Et", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("İptal")
+            }
+        }
+    )
+}
+
+@Composable
 private fun HowToUseTipCard() {
     Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
             modifier = Modifier
@@ -791,16 +1093,16 @@ private fun HowToUseTipCard() {
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer),
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Rounded.Share,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.size(21.dp)
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(19.dp)
                 )
             }
 
@@ -808,11 +1110,12 @@ private fun HowToUseTipCard() {
                 Text(
                     text = "Nasıl Kullanılır?",
                     style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
-                    text = "Herhangi bir uygulamada Paylaş → UlgenTube ile İndir seçin, anında popup açılsın!",
+                    text = "Herhangi bir uygulamada Paylaş → UlgenTube ile İndir seçin, anında popup açılsın.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

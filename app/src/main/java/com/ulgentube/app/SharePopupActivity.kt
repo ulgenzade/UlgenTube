@@ -271,7 +271,11 @@ class SharePopupActivity : ComponentActivity() {
 
         // Explicit intent ile yetkisiz MIME tiplerinin gönderilmesini engelle
         val mimeType = intent.type
-        if (mimeType == null || !mimeType.startsWith("text/plain", ignoreCase = true)) {
+        val isAllowedMime = mimeType != null && (
+            mimeType.startsWith("text/", ignoreCase = true) ||
+                mimeType == "*/*"
+            )
+        if (!isAllowedMime) {
             Toast.makeText(this, "Desteklenmeyen paylaşım türü.", Toast.LENGTH_SHORT).show()
             finishPopup()
             return

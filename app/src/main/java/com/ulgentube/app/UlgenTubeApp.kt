@@ -70,6 +70,7 @@ class UlgenTubeApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        com.ulgentube.app.util.DiagnosticLogManager.init(this)
         createNotificationChannels()
         container = DefaultAppContainer(
             applicationContext = applicationContext,

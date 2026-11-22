@@ -33,8 +33,10 @@ object ErrorMessageSanitizer {
         return when {
             lower.contains("cleartext") ->
                 "Güvenlik nedeniyle yalnızca şifreli (HTTPS) bağlantılar desteklenir."
-            lower.contains("private") || lower.contains("login") || lower.contains("sign in") ->
-                "Bu içerik gizli veya giriş gerektiriyor. Herkese açık bir bağlantı deneyin."
+            lower.contains("confirm you're not a bot") || lower.contains("sign in to confirm") ->
+                "YouTube geçici doğrulama istiyor. Ayarlar'dan yt-dlp motorunu güncelleyin veya çerez (cookies.txt) ekleyin."
+            lower.contains("private") || lower.contains("login") || lower.contains("sign in") || lower.contains("cookies") ->
+                "Bu içerik gizli veya giriş gerektiriyor. Ayarlar'dan cookies.txt ekleyebilir veya herkese açık bir bağlantı deneyebilirsiniz."
             lower.contains("not available") || lower.contains("unavailable") || lower.contains("404") ->
                 "İçerik bulunamadı veya erişime kapalı."
             lower.contains("429") || lower.contains("too many requests") ->
@@ -45,9 +47,18 @@ object ErrorMessageSanitizer {
                 "Yerel ağ adreslerine güvenlik nedeniyle erişilemez."
             lower.contains("boyut sınırı") || lower.contains("çok büyük") ->
                 raw.take(140)
-            INTERNAL_PATH_REGEX.containsMatchIn(raw) || raw.length > 160 || raw.contains('\n') ->
-                fallback
-            else -> raw.trim()
+            else -> {
+                // yt-dlp ERROR: satırı varsa dahili yolları maskeleyip net sebep göster
+                val errorLine = raw.lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.startsWith("ERROR:", ignoreCase = true) }
+                    ?.removePrefix("ERROR:")
+                    ?.trim()
+                val candidate = (errorLine ?: raw.trim())
+                    .replace(INTERNAL_PATH_REGEX, "[yol]")
+                    .take(160)
+                if (candidate.isBlank() || candidate.contains('\n')) fallback else "$fallback ($candidate)"
+            }
         }
     }
 }

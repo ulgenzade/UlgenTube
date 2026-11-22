@@ -30,7 +30,7 @@ object MediaUriHelper {
                         val filePath = parsed.path?.takeIf { it.isNotBlank() }
                         if (filePath != null) {
                             val file = File(filePath)
-                            if (file.exists() && isWithinAllowedMediaDirs(file)) {
+                            if (file.exists() && isWithinAllowedMediaDirs(file, context)) {
                                 return runCatching {
                                     FileProvider.getUriForFile(
                                         context,
@@ -50,7 +50,7 @@ object MediaUriHelper {
 
         val rawPath = task.savedPath?.takeIf { it.isNotBlank() } ?: return null
         val file = File(rawPath)
-        if (!file.exists() || !isWithinAllowedMediaDirs(file)) return null
+        if (!file.exists() || !isWithinAllowedMediaDirs(file, context)) return null
 
         return runCatching {
             FileProvider.getUriForFile(
@@ -62,25 +62,51 @@ object MediaUriHelper {
     }
 
     /**
+     * Özel Kasa (Private Vault) klasörünü (`filesDir/vault`) döndürür ve galeride
+     * görünmemesi için içinde `.nomedia` dosyasının bulunmasını güvenceye alır.
+     */
+    fun getVaultDir(context: Context): File {
+        val vaultDir = File(context.filesDir, VAULT_DIR_NAME)
+        if (!vaultDir.exists()) {
+            vaultDir.mkdirs()
+        }
+        val noMediaFile = File(vaultDir, ".nomedia")
+        if (!noMediaFile.exists()) {
+            runCatching { noMediaFile.createNewFile() }
+        }
+        return vaultDir
+    }
+
+    /**
      * Verilen dosyanın UlgenTube'un izin verilen ortak medya klasörleri
-     * (`Movies/UlgenTube`, `Music/UlgenTube`, `Pictures/UlgenTube` ve tüm alt klasörleri)
-     * içinde olup olmadığını canonical path üzerinden doğrular.
+     * (`Movies/UlgenTube`, `Music/UlgenTube`, `Pictures/UlgenTube`, `Ringtones/UlgenTube`)
+     * veya Özel Kasa (`filesDir/vault`) içinde olup olmadığını canonical path üzerinden doğrular.
      */
     @Suppress("DEPRECATION")
-    fun isWithinAllowedMediaDirs(file: File): Boolean {
+    fun isWithinAllowedMediaDirs(file: File, context: Context? = null): Boolean {
         val canonicalFilePath = runCatching { file.canonicalPath }.getOrNull() ?: return false
-        val allowedDirs = listOf(
-            Environment.DIRECTORY_MOVIES,
-            Environment.DIRECTORY_MUSIC,
-            Environment.DIRECTORY_PICTURES
-        ).mapNotNull { dirType ->
-            runCatching {
-                File(Environment.getExternalStoragePublicDirectory(dirType), "UlgenTube")
-                    .canonicalPath + File.separator
-            }.getOrNull()
+        val allowedDirs = buildList {
+            listOf(
+                Environment.DIRECTORY_MOVIES,
+                Environment.DIRECTORY_MUSIC,
+                Environment.DIRECTORY_PICTURES,
+                Environment.DIRECTORY_RINGTONES
+            ).forEach { dirType ->
+                runCatching {
+                    File(Environment.getExternalStoragePublicDirectory(dirType), "UlgenTube")
+                        .canonicalPath + File.separator
+                }.getOrNull()?.let { add(it) }
+            }
+            if (context != null) {
+                runCatching {
+                    File(context.filesDir, VAULT_DIR_NAME).canonicalPath + File.separator
+                }.getOrNull()?.let { add(it) }
+            }
         }
         return allowedDirs.any { canonicalFilePath.startsWith(it) }
     }
+
+    private const val VAULT_DIR_NAME = "vault"
 
     /**
      * Medya kategorisine uygun genel MIME türünü döndürür.

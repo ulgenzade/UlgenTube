@@ -41,17 +41,32 @@ class YtDlpEngine(
      */
     suspend fun fetchMediaInfo(
         url: String,
-        platform: PlatformType
+        platform: PlatformType,
+        useCookies: Boolean = true,
+        poToken: String? = null,
+        visitorData: String? = null
     ): ExtractedMedia = withContext(Dispatchers.IO) {
         val safeUrl = UrlSanitizer.extractFirstValidUrl(url)
             ?: throw IllegalArgumentException("Geçerli ve güvenli bir bağlantı bulunamadı.")
 
+        val cookieFile = if (useCookies) cookieRepository?.getCookieFile() else null
+
         val request = YoutubeDLRequest(safeUrl).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
-            addOption("--skip-download")
-            addOption("--proto", "http,https")
-            addOption("--socket-timeout", "20")
+            addOption("--no-check-formats")
+            addOption("--socket-timeout", "15")
+            if (platform == PlatformType.YOUTUBE) {
+                val extractorArgs = buildYoutubeExtractorArgs(
+                    hasCookies = cookieFile != null,
+                    poToken = poToken,
+                    visitorData = visitorData
+                )
+                addOption("--extractor-args", extractorArgs)
+            }
+            cookieFile?.let { file ->
+                addOption("--cookies", file.absolutePath)
+            }
         }
 
         val info: VideoInfo = YoutubeDL.getInstance().getInfo(request)
@@ -104,15 +119,24 @@ class YtDlpEngine(
         platform: PlatformType
     ): ExtractedMedia? = withContext(Dispatchers.IO) {
         val safeUrl = UrlSanitizer.extractFirstValidUrl(url) ?: return@withContext null
-        if (!isLikelyPlaylistUrl(safeUrl)) return@withContext null
+        val isIgStoryOrProfile = platform == PlatformType.INSTAGRAM &&
+            SocialImageExtractor.isInstagramStoryOrProfileUrl(safeUrl)
+        if (!isLikelyPlaylistUrl(safeUrl) && !isIgStoryOrProfile) return@withContext null
+
+        val cookieFile = cookieRepository?.getCookieFile()
+        if (isIgStoryOrProfile && cookieFile == null) {
+            return@withContext null
+        }
 
         val request = YoutubeDLRequest(safeUrl).apply {
             addOption("--flat-playlist")
             addOption("--dump-single-json")
             addOption("--no-warnings")
-            addOption("--proto", "http,https")
-            addOption("--socket-timeout", "20")
+            addOption("--socket-timeout", "25")
             addOption("--playlist-end", MAX_PLAYLIST_ENTRIES.toString())
+            cookieFile?.let { file ->
+                addOption("--cookies", file.absolutePath)
+            }
         }
 
         val response = YoutubeDL.getInstance().execute(request)
@@ -121,7 +145,8 @@ class YtDlpEngine(
 
         val root = runCatching { JSONObject(rawJson) }.getOrNull() ?: return@withContext null
         val entriesArray = root.optJSONArray("entries") ?: return@withContext null
-        if (entriesArray.length() < 2) return@withContext null
+        val minRequiredEntries = if (isIgStoryOrProfile) 1 else 2
+        if (entriesArray.length() < minRequiredEntries) return@withContext null
 
         val playlistTitle = root.optString("title").takeIf { it.isNotBlank() } ?: "Oynatma Listesi"
         val playlistAuthor = root.optString("uploader").takeIf { it.isNotBlank() }
@@ -159,7 +184,7 @@ class YtDlpEngine(
             }
         }
 
-        if (entries.size < 2) return@withContext null
+        if (entries.size < minRequiredEntries) return@withContext null
 
         val playlistThumb = extractSafeJsonThumbnail(root) ?: entries.firstOrNull()?.thumbnailUrl
 
@@ -186,6 +211,9 @@ class YtDlpEngine(
         task: DownloadTask,
         outputDir: File,
         settings: AppSettings,
+        poToken: String? = null,
+        visitorData: String? = null,
+        maxSpeedKbps: Int = 0,
         onProgress: (progress: Float, etaSeconds: Long, speedText: String?) -> Unit
     ): File = withContext(Dispatchers.IO) {
         if (!outputDir.exists()) {
@@ -198,19 +226,45 @@ class YtDlpEngine(
             ?: throw IllegalArgumentException("Geçersiz veya güvensiz indirme bağlantısı.")
 
         val hasClipRange = task.clipStartSeconds != null || task.clipEndSeconds != null
+        val parallelConns = if (settings.parallelDownloadEnabled) {
+            settings.parallelConnectionCount.coerceIn(1, 16)
+        } else {
+            1
+        }
+        val effectiveSpeedKbps = when {
+            maxSpeedKbps > 0 -> maxSpeedKbps
+            settings.maxDownloadSpeedKbps > 0 -> settings.maxDownloadSpeedKbps
+            else -> 0
+        }
+        val activeCookieFile = if (settings.cookiesEnabled) cookieRepository?.getCookieFile() else null
+        val resolvedPoToken = poToken?.takeIf { it.isNotBlank() }
+            ?: if (settings.poTokenEnabled) settings.cachedPoToken else null
+        val resolvedVisitorData = visitorData?.takeIf { it.isNotBlank() }
+            ?: if (settings.poTokenEnabled) settings.cachedVisitorData else null
+        val youtubeExtractorArgs = buildYoutubeExtractorArgs(
+            hasCookies = activeCookieFile != null,
+            poToken = resolvedPoToken,
+            visitorData = resolvedVisitorData
+        )
 
         val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("--no-playlist")
             addOption("--no-mtime")
             addOption("--newline")
             addOption("--continue")
-            addOption("--proto", "http,https")
+            addOption("-N", parallelConns.toString())
             addOption("-o", outputTemplate)
 
-            if (settings.cookiesEnabled) {
-                cookieRepository?.getCookieFile()?.let { cookieFile ->
-                    addOption("--cookies", cookieFile.absolutePath)
-                }
+            if (effectiveSpeedKbps > 0) {
+                addOption("--limit-rate", "${effectiveSpeedKbps}K")
+            }
+
+            if (task.platform == PlatformType.YOUTUBE) {
+                addOption("--extractor-args", youtubeExtractorArgs)
+            }
+
+            activeCookieFile?.let { cookieFile ->
+                addOption("--cookies", cookieFile.absolutePath)
             }
 
             if (settings.sponsorBlockEnabled && task.platform == PlatformType.YOUTUBE) {
@@ -280,16 +334,77 @@ class YtDlpEngine(
                 }
             }
 
-            if (settings.useAria2c && isAria2cReady() && !hasClipRange) {
+            // YouTube DASH/chunked akışlarında harici aria2c 403/exit code hatası verdiği için
+            // YouTube'da yt-dlp'nin kendi yerleşik -N çoklu fragment indiricisi kullanılır.
+            if (settings.useAria2c && isAria2cReady() && !hasClipRange && task.platform != PlatformType.YOUTUBE) {
                 addOption("--downloader", "libaria2c.so")
-                addOption("--external-downloader-args", "aria2c:-x 8 -k 1M -c")
+                val aria2SpeedArg = if (effectiveSpeedKbps > 0) " --max-overall-download-limit=${effectiveSpeedKbps}K" else ""
+                addOption("--external-downloader-args", "aria2c:-x $parallelConns -s $parallelConns -k 1M -c$aria2SpeedArg")
             }
         }
 
-        YoutubeDL.getInstance().execute(request, task.id) { progress, etaInSeconds, line ->
-            val clampedProgress = if (progress in 0f..100f) progress else 0f
-            val speed = extractSpeed(line)
-            onProgress(clampedProgress, etaInSeconds, speed)
+        val primaryAttempt = runCatching {
+            YoutubeDL.getInstance().execute(request, task.id) { progress, etaInSeconds, line ->
+                val clampedProgress = if (progress in 0f..100f) progress else 0f
+                val speed = extractSpeed(line)
+                onProgress(clampedProgress, etaInSeconds, speed)
+            }
+        }
+
+        if (primaryAttempt.isFailure) {
+            // İlk deneme (aria2c, özel format ID veya postprocessor nedeniyle) başarısız olduysa
+            // yarım dosyaları temizleyip aria2c'siz, en uyumlu yalın yt-dlp isteğiyle otomatik tekrar dene
+            outputDir.listFiles()?.forEach { runCatching { it.delete() } }
+
+            val fallbackRequest = YoutubeDLRequest(sourceUrl).apply {
+                addOption("--no-playlist")
+                addOption("--no-mtime")
+                addOption("--newline")
+                addOption("-N", parallelConns.toString())
+                addOption("-o", outputTemplate)
+
+                if (effectiveSpeedKbps > 0) {
+                    addOption("--limit-rate", "${effectiveSpeedKbps}K")
+                }
+
+                if (task.platform == PlatformType.YOUTUBE) {
+                    addOption("--extractor-args", youtubeExtractorArgs)
+                }
+
+                activeCookieFile?.let { cookieFile ->
+                    addOption("--cookies", cookieFile.absolutePath)
+                }
+
+                if (task.isAudioExtraction || task.category == MediaCategory.AUDIO) {
+                    val targetAudioFormat = task.targetExtension.lowercase(Locale.ROOT)
+                        .takeIf { it in SUPPORTED_AUDIO_FORMATS } ?: "mp3"
+                    addOption("-f", "bestaudio/best")
+                    addOption("-x")
+                    addOption("--audio-format", targetAudioFormat)
+                    addOption("--audio-quality", resolveAudioQuality(task.formatLabel))
+                } else {
+                    val requestedHeight = task.transcodeTargetHeight?.takeIf { it in ALLOWED_TRANSCODE_HEIGHTS }
+                        ?: Regex("""(\d{3,4})p""", RegexOption.IGNORE_CASE)
+                            .find(task.formatLabel)
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                            ?.takeIf { it in 144..4320 }
+                    val fallbackSelector = if (requestedHeight != null) {
+                        "bestvideo[height<=$requestedHeight][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=$requestedHeight]+bestaudio/best[height<=$requestedHeight]/best"
+                    } else {
+                        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+                    }
+                    addOption("-f", fallbackSelector)
+                    addOption("--merge-output-format", "mp4")
+                }
+            }
+
+            YoutubeDL.getInstance().execute(fallbackRequest, task.id) { progress, etaInSeconds, line ->
+                val clampedProgress = if (progress in 0f..100f) progress else 0f
+                val speed = extractSpeed(line)
+                onProgress(clampedProgress, etaInSeconds, speed)
+            }
         }
 
         findDownloadedFile(outputDir)
@@ -452,7 +567,33 @@ class YtDlpEngine(
             return "https://www.youtube.com/watch?v=$entryId"
         }
 
+        if (platform == PlatformType.INSTAGRAM && SAFE_FORMAT_ID_REGEX.matches(entryId)) {
+            return "https://www.instagram.com/p/$entryId/"
+        }
+
         return null
+    }
+
+    private fun buildYoutubeExtractorArgs(
+        hasCookies: Boolean,
+        poToken: String?,
+        visitorData: String?
+    ): String {
+        val base = if (hasCookies) {
+            "youtube:player_client=tv,web_safari,mweb,web;skip=translated_subs"
+        } else {
+            "youtube:player_client=android,ios,tv;skip=translated_subs"
+        }
+        val sb = StringBuilder(base)
+        val safePo = poToken?.trim()?.takeIf { it.isNotBlank() && SAFE_EXTRACTOR_ARG_TOKEN_REGEX.matches(it) }
+        val safeVisitor = visitorData?.trim()?.takeIf { it.isNotBlank() && SAFE_EXTRACTOR_ARG_TOKEN_REGEX.matches(it) }
+        if (safePo != null) {
+            sb.append(";po_token=mweb.gvs+").append(safePo)
+        }
+        if (safeVisitor != null) {
+            sb.append(";visitor_data=").append(safeVisitor)
+        }
+        return sb.toString()
     }
 
     private fun extractSafeJsonThumbnail(obj: JSONObject): String? {
@@ -478,7 +619,7 @@ class YtDlpEngine(
      * - Birebir `formatId` seçimi
      * - Yalnızca tek çözünürlük dönen platformlarda (Instagram/Twitter vb.) orijinalin altına FFmpeg küçültme seçenekleri.
      */
-    private fun buildRealVideoFormats(
+    internal fun buildRealVideoFormats(
         formats: List<VideoFormat>,
         platform: PlatformType
     ): List<MediaFormatOption> {
@@ -509,6 +650,7 @@ class YtDlpEngine(
             val fpsBucket = bucketFps(fpsValue)
             val codec = cleanVideoCodec(fmt.vcodec)
             val isHdrOrHighBit = detectHdrOrHighBit(fmt)
+            val isEnhancedBitrate = detectEnhancedBitrate(fmt)
             val tbr = fmt.tbr.toDouble().coerceAtLeast(0.0)
 
             ParsedVideoStream(
@@ -518,6 +660,7 @@ class YtDlpEngine(
                 fpsBucket = fpsBucket,
                 codec = codec,
                 isHdrOrHighBit = isHdrOrHighBit,
+                isEnhancedBitrate = isEnhancedBitrate,
                 tbr = tbr
             )
         }
@@ -539,7 +682,7 @@ class YtDlpEngine(
             )
         }
 
-        // Aynı (effectiveHeight, fpsBucket) grubu için taban/medyan tbr hesapla (1.6x üzeri -> Yüksek Bitrate)
+        // Aynı (effectiveHeight, fpsBucket) grubu için taban/medyan tbr hesapla (1.45x üzeri -> Yüksek Bit Hızı)
         val groupMedianTbr = parsedStreams
             .groupBy { it.effectiveHeight to it.fpsBucket }
             .mapValues { (_, list) ->
@@ -557,9 +700,10 @@ class YtDlpEngine(
         val groupedBest = parsedStreams
             .groupBy { stream ->
                 val medianTbr = groupMedianTbr[stream.effectiveHeight to stream.fpsBucket] ?: 0.0
-                val isHighBitrate = !stream.isHdrOrHighBit &&
-                    medianTbr > 0.0 &&
-                    stream.tbr >= medianTbr * HIGH_BITRATE_MULTIPLIER
+                val isHighBitrate = stream.isEnhancedBitrate ||
+                    (!stream.isHdrOrHighBit &&
+                        medianTbr > 0.0 &&
+                        stream.tbr >= medianTbr * HIGH_BITRATE_MULTIPLIER)
                 StreamGroupKey(
                     effectiveHeight = stream.effectiveHeight,
                     fpsBucket = stream.fpsBucket,
@@ -569,7 +713,8 @@ class YtDlpEngine(
             }
             .map { (key, candidates) ->
                 val best = candidates.maxWithOrNull(
-                    compareBy<ParsedVideoStream> { it.tbr }
+                    compareBy<ParsedVideoStream> { if (it.isEnhancedBitrate) 1 else 0 }
+                        .thenBy { it.tbr }
                         .thenBy { codecPriority(it.codec) }
                         .thenBy { if (it.format.ext.equals("mp4", ignoreCase = true)) 1 else 0 }
                         .thenBy { resolveSize(it.format) ?: 0L }
@@ -608,8 +753,11 @@ class YtDlpEngine(
                 }
                 if (key.isHdrOrHighBit) {
                     add("HDR / 10-bit")
+                }
+                if (stream.isEnhancedBitrate) {
+                    add("Gelişmiş Bit Hızı")
                 } else if (key.isHighBitrateVariant) {
-                    add("Yüksek Bitrate")
+                    add("Yüksek Bit Hızı")
                 }
                 stream.codec?.let { add(it) }
             }
@@ -618,10 +766,9 @@ class YtDlpEngine(
             val bitrateLabel = stream.tbr.toInt().takeIf { it > 0 }?.let { formatBitrate(it) }
             val sizeLabel = FormatUtils.formatBytes(totalSize)
             val sublabel = listOfNotNull(
-                "MP4",
                 bitrateLabel,
                 sizeLabel.takeIf { it.isNotBlank() }
-            ).joinToString(" • ")
+            ).joinToString(" • ").ifBlank { "MP4 Video" }
 
             MediaFormatOption(
                 id = "video_${formatId}_${stream.effectiveHeight}p_${stream.fps}fps",
@@ -682,7 +829,7 @@ class YtDlpEngine(
         }
     }
 
-    private fun detectHdrOrHighBit(fmt: VideoFormat): Boolean {
+    internal fun detectHdrOrHighBit(fmt: VideoFormat): Boolean {
         val note = fmt.formatNote?.lowercase(Locale.ROOT).orEmpty()
         val formatDesc = fmt.format?.lowercase(Locale.ROOT).orEmpty()
         val vcodec = fmt.vcodec?.lowercase(Locale.ROOT).orEmpty()
@@ -694,6 +841,14 @@ class YtDlpEngine(
             vcodec.contains("hvc1.2")
 
         return textHit || codecHit
+    }
+
+    internal fun detectEnhancedBitrate(fmt: VideoFormat): Boolean {
+        val id = fmt.formatId?.trim()
+        if (id == "356" || id == "616") return true
+        val note = fmt.formatNote?.lowercase(Locale.ROOT).orEmpty()
+        val formatDesc = fmt.format?.lowercase(Locale.ROOT).orEmpty()
+        return ENHANCED_BITRATE_KEYWORDS.any { kw -> note.contains(kw) || formatDesc.contains(kw) }
     }
 
     private fun codecPriority(codec: String?): Int = when (codec) {
@@ -775,6 +930,7 @@ class YtDlpEngine(
         val fpsBucket: Int,
         val codec: String?,
         val isHdrOrHighBit: Boolean,
+        val isEnhancedBitrate: Boolean,
         val tbr: Double
     )
 
@@ -791,18 +947,20 @@ class YtDlpEngine(
     }
 
     companion object {
-        private const val HIGH_BITRATE_MULTIPLIER = 1.6
+        private const val HIGH_BITRATE_MULTIPLIER = 1.45
         private const val MAX_PLAYLIST_ENTRIES = 100
         private const val MAX_SUBTITLE_OPTIONS = 12
 
         private val SAFE_FORMAT_ID_REGEX = Regex("""^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$""")
         private val SAFE_FORMAT_SELECTOR_REGEX = Regex("""^[a-zA-Z0-9._+\-/\[\]=]{1,200}$""")
         private val SAFE_SUBTITLE_LANG_REGEX = Regex("""^[a-zA-Z0-9,_-]{2,32}$""")
+        private val SAFE_EXTRACTOR_ARG_TOKEN_REGEX = Regex("""^[A-Za-z0-9%_\-+/=]{4,512}$""")
         private val ALLOWED_TRANSCODE_HEIGHTS = setOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
         private val SPEED_REGEX = Regex("""\b\d+(?:\.\d+)?\s*[KMG]i?B/s\b""", RegexOption.IGNORE_CASE)
         private val SUPPORTED_AUDIO_FORMATS = setOf("mp3", "m4a", "opus", "flac", "wav")
         private val SIDECAR_EXTENSIONS = setOf("webp", "jpg", "jpeg", "png", "srt", "vtt", "ass", "lrc", "json", "description")
-        private val HDR_KEYWORDS = listOf("hdr", "10bit", "10-bit", "premium", "enhanced", "high")
+        private val HDR_KEYWORDS = listOf("hdr", "10bit", "10-bit")
+        private val ENHANCED_BITRATE_KEYWORDS = listOf("premium", "enhanced", "high bitrate")
         private val DOWNSCALE_STEPS = listOf(720, 480, 360)
 
         private val LANGUAGE_LABELS_TR = mapOf(
@@ -825,6 +983,7 @@ class YtDlpEngine(
             val lower = url.lowercase(Locale.ROOT)
             return lower.contains("list=") ||
                 lower.contains("/playlist") ||
+                lower.contains("/browse/mpreb_") ||
                 lower.contains("/sets/")
         }
 

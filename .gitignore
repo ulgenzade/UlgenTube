@@ -32,13 +32,18 @@ google-services.json
 *.swo
 *~
 
-# İşletim Sistemi & Log Dosyaları
+# İşletim Sistemi, Ajan & Log Dosyaları
 .DS_Store
 Thumbs.db
 desktop.ini
 *.log
 *.hprof
 *.tmp
+graphify-out/
+**/graphify-out/
+GEMINI.md
+.agents/
+.claude/
 
 # Gradle Wrapper JAR mutlaka takip edilsin
 !gradle/wrapper/gradle-wrapper.jar

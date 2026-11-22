@@ -10,4 +10,14 @@
     <external-path
         name="external_pictures"
         path="Pictures/UlgenTube/" />
+    <external-path
+        name="external_ringtones"
+        path="Ringtones/UlgenTube/" />
+    <!-- Özel Kasa (Private Vault) ve geçici paylaşım klasörleri -->
+    <files-path
+        name="vault_media"
+        path="vault/" />
+    <cache-path
+        name="cache_media"
+        path="." />
 </paths>

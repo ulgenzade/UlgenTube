@@ -131,7 +131,12 @@ object UrlSanitizer {
 
             host == "reddit.com" ||
                 host.endsWith(".reddit.com") ||
-                host == "redd.it" -> PlatformType.REDDIT
+                host == "redd.it" ||
+                host == "v.redd.it" ||
+                host == "rxddit.com" ||
+                host.endsWith(".rxddit.com") ||
+                host == "vxreddit.com" ||
+                host.endsWith(".vxreddit.com") -> PlatformType.REDDIT
 
             host == "pinterest.com" ||
                 host.endsWith(".pinterest.com") ||

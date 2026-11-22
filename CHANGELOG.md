@@ -2,6 +2,25 @@
 
 Bu projedeki tüm önemli değişiklikler bu dosyada belgelenir.
 
+## [2.1.0] - 2026-11-22
+
+### Yeni Özellikler
+- **YouTube Innertube + Android Native `MediaMuxer` Motoru**: 4K (`2160p`), 2K (`1440p`), `1080p60`, `HDR / 10-bit` (`AV1`, `VP9`, `H.264`) akışları doğrudan Innertube (`IOS 20.10.4` / `ANDROID 20.10.38` + `IOS_PRODUCER`) üzerinden ~0.4 saniyede çözme ve Android 10–15+ (`targetSdk 35`) SELinux kısıtına takılmadan yerel `MediaMuxer` ile kayıpsız birleştirme (25 GB akış desteği, 4K60 dinamik 4–16 MB tampon).
+- **YouTube Music Albüm & Hızlı Playlist Motoru**: `music.youtube.com/browse/MPREb_...`, `list=OLAK5uy_...` ve `list=PL...` bağlantıları `WEB_REMIX` üzerinden ~0.4 saniyede çözülür; albüm/playlist şarkıları doğrudan Innertube ile yüksek hızda iner.
+- **Altyazı (`.vtt`) & Tek Satır Temizleyici**: İmzalı YouTube altyazı indirme, Android 10+ Scoped Storage (`filesDir/subtitles`) dahili oynatıcı CC uyumu ve kaydırmalı VTT çift satır tekilleştirme.
+- **Instagram Hikaye, Oturum & Tam Ekran Hesap Girişi**: `InAppCookieLoginDialog` tam ekran yeniden tasarımı (Instagram, YouTube, X, TikTok, Reddit), `X-CSRFToken` + doğrudan `/api/v1/media/{id}/info/` hikaye çıkarıcı ve oturumlu WebView sniffer yedeği.
+- **Reddit 18+ (NSFW) & Redgifs v2 HD MP4**: `over18=1` + oturum çerezleri, Reddit yaş kapısı/logo filtresi ve Redgifs v2 geçici token ile doğrudan HD MP4 indirme.
+- **İndirme Yönetimi & Akıllı UX**: Duraklat / Devam Et (tekil ve toplu), uzun basarak Çoklu Seçim (Özel Kasa / Toplu Sil), aynı dosya varsa *"İçeriği Göster / Yine de İndir"* onay penceresi, Akıllı Hızlı İndir Hafızası, kapaktan İndirmeden Önizle (`▶`), Codec/Boyut kıyas rozetleri ve Canlı Depolama Çubuğu.
+- **5 Kategorili Sayfalandırılmış Ayarlar & Hata Teşhis Günlüğü**: Ayarlar 5 temiz alt sayfaya ayrıldı; hassas verileri maskeleyen `DiagnosticLogManager` ile hatalı indirme kartından, hata penceresinden ve Ayarlar'dan tek tıkla kopyalama / `.txt` dosya paylaşımı eklendi.
+- **Dahili PiP Oynatıcı, Mini Müzik Çalar Pro, Stüdyo Pro & Özel Kasa**: Media3 PiP video oynatıcı, 5 bantlı Ekolayzır + LRC şarkı sözleri, 9 araçlı FFmpeg Stüdyo Pro, kanal takibi (RSS), JSON yedekleme/geri yükleme ve SHA-256 PIN/biyometrik kilitli Özel Kasa (Room v4).
+
+### Düzeltmeler
+- 1080p/4K indirmelerinin SELinux FFmpeg hatası nedeniyle 360p'ye düşmesi tamamen giderildi.
+- Paralel indirme kapalıyken oluşan 90 KB/s YouTube hız kısıtlaması 4 MB sıralı HTTP Range parçalarıyla çözüldü.
+- Özel Kasa gizlilik filtresi, Stüdyo scroll taşması, WebM audio MIME çakışması, WebView ve ViewModel bellek sızıntıları giderildi.
+
+---
+
 ## [2.0.0] - 2026-11-19
 
 ### Yeni Özellikler

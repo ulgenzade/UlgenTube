@@ -25,18 +25,22 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.Calendar
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Arka planda en fazla 3 eşzamanlı indirmeyi yöneten Ön Plan Servisi (Foreground Service).
+ * Arka planda kullanıcı ayarına göre (1-4) dinamik eşzamanlı indirmeyi yöneten Ön Plan Servisi.
  * Android 14+ (API 34+) için `FOREGROUND_SERVICE_TYPE_DATA_SYNC` tipini kullanır,
  * Wi-Fi kısıtını denetler, canlı ilerleme bildirimi, "İptal" ve tamamlandı bildiriminde
  * doğrudan "Aç" / "Paylaş" aksiyonları sunar.
@@ -44,12 +48,14 @@ import java.util.concurrent.atomic.AtomicReference
 class DownloadForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val concurrencySemaphore = Semaphore(MAX_CONCURRENT_DOWNLOADS)
+    private val queueMutex = Mutex()
+    private val activeCount = AtomicInteger(0)
     private val activeProgressMap = ConcurrentHashMap<String, ActiveNotificationState>()
     private val completedCountInSession = AtomicInteger(0)
     private val lastCompletedTask = AtomicReference<DownloadTask?>(null)
     private val lastStartId = AtomicInteger(-1)
     private val lastNotificationUpdateMs = AtomicLong(0L)
+    private val scheduleWaitJob = AtomicReference<Job?>(null)
 
     private val repository: DownloadRepository
         get() = (application as UlgenTubeApp).container.downloadRepository
@@ -68,7 +74,7 @@ class DownloadForegroundService : Service() {
                     serviceScope.launch {
                         repository.cancel(taskId)
                         activeProgressMap.remove(taskId)
-                        refreshProgressNotificationOrStop()
+                        enqueuePendingTasks()
                     }
                 }
                 return START_NOT_STICKY
@@ -76,6 +82,7 @@ class DownloadForegroundService : Service() {
 
             ACTION_CANCEL_ALL -> {
                 serviceScope.launch {
+                    scheduleWaitJob.getAndSet(null)?.cancel()
                     repository.cancelAllActive()
                     activeProgressMap.clear()
                     stopServiceGracefully()
@@ -92,24 +99,59 @@ class DownloadForegroundService : Service() {
 
     private fun enqueuePendingTasks() {
         serviceScope.launch {
-            val settings = settingsRepository.getCurrentSettings()
-            if (settings.wifiOnly && !isWifiConnected()) {
-                if (activeProgressMap.isEmpty()) {
-                    showWifiWaitingNotification()
-                    stopServiceGracefully()
+            queueMutex.withLock {
+                val settings = settingsRepository.getCurrentSettings()
+                val maxConcurrent = settings.maxConcurrentDownloads.coerceIn(1, 4)
+
+                if (settings.wifiOnly && !isWifiConnected()) {
+                    if (activeCount.get() == 0 && activeProgressMap.isEmpty()) {
+                        showWifiWaitingNotification()
+                        stopServiceGracefully()
+                    }
+                    return@withLock
                 }
-                return@launch
-            }
 
-            val pendingTasks = repository.getPendingTasks()
-            if (pendingTasks.isEmpty() && activeProgressMap.isEmpty()) {
-                stopServiceGracefully()
-                return@launch
-            }
+                val pendingTasks = repository.getPendingTasks().filterNot { repository.isTaskRunning(it.id) }
 
-            pendingTasks.forEach { task ->
-                if (!repository.isTaskRunning(task.id)) {
-                    launchDownloadJob(task)
+                if (settings.scheduledDownloadEnabled) {
+                    val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                    if (!isWithinScheduleWindow(currentHour, settings.scheduleStartHour, settings.scheduleEndHour)) {
+                        if (pendingTasks.isNotEmpty()) {
+                            updateScheduleWaitingNotification(settings.scheduleStartHour, settings.scheduleEndHour)
+                            ensureScheduleWaitLoop()
+                        } else if (activeCount.get() == 0 && activeProgressMap.isEmpty()) {
+                            scheduleWaitJob.getAndSet(null)?.cancel()
+                            stopServiceGracefully()
+                        }
+                        return@withLock
+                    } else {
+                        scheduleWaitJob.getAndSet(null)?.cancel()
+                    }
+                } else {
+                    scheduleWaitJob.getAndSet(null)?.cancel()
+                }
+
+                val currentlyActive = activeCount.get()
+                val availableSlots = (maxConcurrent - currentlyActive).coerceAtLeast(0)
+
+                if (availableSlots > 0 && pendingTasks.isNotEmpty()) {
+                    pendingTasks.take(availableSlots).forEach { task ->
+                        launchDownloadJob(task)
+                    }
+                }
+
+                if (activeCount.get() == 0 && activeProgressMap.isEmpty() && pendingTasks.isEmpty()) {
+                    val completedTotal = completedCountInSession.getAndSet(0)
+                    val completedTask = lastCompletedTask.getAndSet(null)
+                    if (completedTotal > 0) {
+                        showCompletionNotification(
+                            completedCount = completedTotal,
+                            lastTask = completedTask
+                        )
+                    }
+                    stopServiceGracefully()
+                } else if (activeProgressMap.isNotEmpty()) {
+                    updateProgressNotification()
                 }
             }
         }
@@ -118,6 +160,38 @@ class DownloadForegroundService : Service() {
     private fun launchDownloadJob(task: DownloadTask) {
         lateinit var job: kotlinx.coroutines.Job
         job = serviceScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val result = repository.executeDownload(task) { progress, speedText, status ->
+                    val prevStatus = activeProgressMap[task.id]?.status
+                    activeProgressMap[task.id] = ActiveNotificationState(
+                        taskId = task.id,
+                        title = task.title,
+                        progress = progress.toInt().coerceIn(0, 100),
+                        speedText = speedText,
+                        status = status
+                    )
+                    updateProgressNotification(force = prevStatus != status)
+                }
+
+                result.getOrNull()?.let { completedTask ->
+                    completedCountInSession.incrementAndGet()
+                    lastCompletedTask.set(completedTask)
+                }
+            } catch (_: CancellationException) {
+                // İptal durumu repository tarafında güncellendi
+            } finally {
+                activeProgressMap.remove(task.id)
+                activeCount.updateAndGet { (it - 1).coerceAtLeast(0) }
+                repository.unregisterActiveJob(task.id, job)
+                if (activeProgressMap.isNotEmpty()) {
+                    updateProgressNotification()
+                }
+                enqueuePendingTasks()
+            }
+        }
+
+        if (repository.tryRegisterActiveJob(task.id, job)) {
+            activeCount.incrementAndGet()
             activeProgressMap[task.id] = ActiveNotificationState(
                 taskId = task.id,
                 title = task.title,
@@ -126,70 +200,14 @@ class DownloadForegroundService : Service() {
                 status = DownloadStatus.QUEUED
             )
             updateProgressNotification(force = true)
-
-            try {
-                concurrencySemaphore.withPermit {
-                    val result = repository.executeDownload(task) { progress, speedText, status ->
-                        val prevStatus = activeProgressMap[task.id]?.status
-                        activeProgressMap[task.id] = ActiveNotificationState(
-                            taskId = task.id,
-                            title = task.title,
-                            progress = progress.toInt().coerceIn(0, 100),
-                            speedText = speedText,
-                            status = status
-                        )
-                        updateProgressNotification(force = prevStatus != status)
-                    }
-
-                    result.getOrNull()?.let { completedTask ->
-                        completedCountInSession.incrementAndGet()
-                        lastCompletedTask.set(completedTask)
-                    }
-                }
-            } catch (_: CancellationException) {
-                // İptal durumu repository tarafında güncellendi
-            } finally {
+            if (!job.start()) {
                 activeProgressMap.remove(task.id)
+                activeCount.updateAndGet { (it - 1).coerceAtLeast(0) }
                 repository.unregisterActiveJob(task.id, job)
-                refreshProgressNotificationOrStop()
             }
-        }
-
-        if (repository.tryRegisterActiveJob(task.id, job)) {
-            job.start()
         } else {
             job.cancel()
         }
-    }
-
-    private suspend fun refreshProgressNotificationOrStop() {
-        if (activeProgressMap.isNotEmpty()) {
-            updateProgressNotification()
-            return
-        }
-
-        // Yeni eklenmiş bekleyen görev var mı tekrar kontrol et
-        val remaining = repository.getPendingTasks().filterNot { repository.isTaskRunning(it.id) }
-        if (remaining.isNotEmpty()) {
-            val settings = settingsRepository.getCurrentSettings()
-            if (settings.wifiOnly && !isWifiConnected()) {
-                showWifiWaitingNotification()
-                stopServiceGracefully()
-                return
-            }
-            remaining.forEach { launchDownloadJob(it) }
-            return
-        }
-
-        val completedTotal = completedCountInSession.getAndSet(0)
-        val completedTask = lastCompletedTask.getAndSet(null)
-        if (completedTotal > 0) {
-            showCompletionNotification(
-                completedCount = completedTotal,
-                lastTask = completedTask
-            )
-        }
-        stopServiceGracefully()
     }
 
     private fun isWifiConnected(): Boolean {
@@ -210,6 +228,68 @@ class DownloadForegroundService : Service() {
             .build()
 
         safeNotify(NOTIFICATION_ID_WIFI_WAITING, notification)
+    }
+
+    private fun updateScheduleWaitingNotification(startHour: Int, endHour: Int) {
+        val cancelAllIntent = Intent(this, DownloadForegroundService::class.java).apply {
+            action = ACTION_CANCEL_ALL
+        }
+        val cancelPendingIntent = PendingIntent.getService(
+            this,
+            REQUEST_CODE_CANCEL,
+            cancelAllIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val text = "Zamanlanmış indirme bekleniyor ($startHour:00 - $endHour:00)"
+        val notification = NotificationCompat.Builder(this, UlgenTubeApp.CHANNEL_DOWNLOADS_PROGRESS)
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("UlgenTube Zamanlayıcı")
+            .setContentText(text)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setContentIntent(createOpenAppPendingIntent())
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "İptal",
+                cancelPendingIntent
+            )
+            .build()
+
+        safeNotify(NOTIFICATION_ID_PROGRESS, notification)
+    }
+
+    private fun ensureScheduleWaitLoop() {
+        val existing = scheduleWaitJob.get()
+        if (existing != null && existing.isActive) return
+
+        val waitJob = serviceScope.launch {
+            while (isActive) {
+                delay(SCHEDULE_CHECK_INTERVAL_MS)
+                val settings = settingsRepository.getCurrentSettings()
+                val pending = repository.getPendingTasks().filterNot { repository.isTaskRunning(it.id) }
+                if (pending.isEmpty()) {
+                    if (activeCount.get() == 0 && activeProgressMap.isEmpty()) {
+                        stopServiceGracefully()
+                    }
+                    break
+                }
+                val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                if (!settings.scheduledDownloadEnabled ||
+                    isWithinScheduleWindow(currentHour, settings.scheduleStartHour, settings.scheduleEndHour)
+                ) {
+                    enqueuePendingTasks()
+                    break
+                } else {
+                    updateScheduleWaitingNotification(settings.scheduleStartHour, settings.scheduleEndHour)
+                }
+            }
+        }
+        val previous = scheduleWaitJob.getAndSet(waitJob)
+        if (previous != null && previous !== waitJob) {
+            previous.cancel()
+        }
     }
 
     private fun promoteToForeground(notification: Notification) {
@@ -404,6 +484,7 @@ class DownloadForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        scheduleWaitJob.getAndSet(null)?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -417,8 +498,8 @@ class DownloadForegroundService : Service() {
     )
 
     companion object {
-        private const val MAX_CONCURRENT_DOWNLOADS = 3
         private const val NOTIFICATION_THROTTLE_MS = 500L
+        private const val SCHEDULE_CHECK_INTERVAL_MS = 60_000L
         private const val NOTIFICATION_ID_PROGRESS = 2001
         private const val NOTIFICATION_ID_COMPLETED = 2002
         private const val NOTIFICATION_ID_WIFI_WAITING = 2003
@@ -431,6 +512,24 @@ class DownloadForegroundService : Service() {
         const val ACTION_CANCEL_TASK = "com.ulgentube.app.action.CANCEL_TASK"
         const val ACTION_CANCEL_ALL = "com.ulgentube.app.action.CANCEL_ALL"
         const val EXTRA_TASK_ID = "extra_task_id"
+
+        /**
+         * Verilen saatin (`0..23`) başlangıç-bitiş zamanlama penceresi içinde olup olmadığını kontrol eder.
+         * - `startHour == endHour` -> her zaman `true`
+         * - Aynı gün penceresi (`startHour < endHour`, örn. 1..7) -> `current in startHour until endHour`
+         * - Gece yarısını aşan pencere (`startHour > endHour`, örn. 23..6) -> `current >= startHour || current < endHour`
+         */
+        fun isWithinScheduleWindow(currentHour: Int, startHour: Int, endHour: Int): Boolean {
+            val current = currentHour.coerceIn(0, 23)
+            val start = startHour.coerceIn(0, 23)
+            val end = endHour.coerceIn(0, 23)
+            if (start == end) return true
+            return if (start < end) {
+                current in start until end
+            } else {
+                current >= start || current < end
+            }
+        }
 
         fun start(context: Context) {
             val intent = Intent(context.applicationContext, DownloadForegroundService::class.java).apply {

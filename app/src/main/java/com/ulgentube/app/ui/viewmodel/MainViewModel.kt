@@ -10,8 +10,11 @@ import com.ulgentube.app.UlgenTubeApp
 import com.ulgentube.app.di.AppContainer
 import com.ulgentube.app.domain.model.AppSettings
 import com.ulgentube.app.domain.model.DownloadTask
+import com.ulgentube.app.domain.model.EqualizerPreset
 import com.ulgentube.app.domain.model.ExtractedMedia
 import com.ulgentube.app.domain.model.FfmpegStudioAction
+import com.ulgentube.app.domain.model.FfmpegStudioOptions
+import com.ulgentube.app.domain.model.FollowedChannel
 import com.ulgentube.app.domain.model.ImageItem
 import com.ulgentube.app.domain.model.MediaFormatOption
 import com.ulgentube.app.domain.model.PlatformType
@@ -19,7 +22,9 @@ import com.ulgentube.app.domain.model.PlaylistEntry
 import com.ulgentube.app.domain.model.ThemeMode
 import com.ulgentube.app.player.MiniPlayerState
 import com.ulgentube.app.util.ErrorMessageSanitizer
+import com.ulgentube.app.util.FormatUtils
 import com.ulgentube.app.util.UrlSanitizer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -28,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Ana uygulama ekranları (Ana Sayfa, İndirmelerim, Ayarlar) için merkezi ViewModel.
@@ -45,6 +51,14 @@ class MainViewModel(
             started = SharingStarted.WhileSubscribed(5_000L),
             initialValue = emptyList()
         )
+
+    val followedChannels: StateFlow<List<FollowedChannel>> =
+        container.downloadRepository.followedChannelsFlow
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5_000L),
+                initialValue = emptyList()
+            )
 
     val settings: StateFlow<AppSettings> = container.settingsRepository.settingsFlow
         .stateIn(
@@ -82,7 +96,40 @@ class MainViewModel(
     private val _cookieMessage = MutableStateFlow<String?>(null)
     val cookieMessage: StateFlow<String?> = _cookieMessage.asStateFlow()
 
+    private val _tempCacheBytes = MutableStateFlow(0L)
+    val tempCacheBytes: StateFlow<Long> = _tempCacheBytes.asStateFlow()
+
+    private val _isAppUnlocked = MutableStateFlow(false)
+    val isAppUnlocked: StateFlow<Boolean> = _isAppUnlocked.asStateFlow()
+
+    private val _isVaultUnlocked = MutableStateFlow(false)
+    val isVaultUnlocked: StateFlow<Boolean> = _isVaultUnlocked.asStateFlow()
+
+    private val _isFetchingLyrics = MutableStateFlow(false)
+    val isFetchingLyrics: StateFlow<Boolean> = _isFetchingLyrics.asStateFlow()
+
+    private val _lyricsOverride = MutableStateFlow<String?>(null)
+    val lyricsOverride: StateFlow<String?> = _lyricsOverride.asStateFlow()
+
+    private val _fetchingPoToken = MutableStateFlow(false)
+    val fetchingPoToken: StateFlow<Boolean> = _fetchingPoToken.asStateFlow()
+
+    private val _isCheckingChannels = MutableStateFlow(false)
+    val isCheckingChannels: StateFlow<Boolean> = _isCheckingChannels.asStateFlow()
+
     private var analyzeJob: Job? = null
+
+    init {
+        container.miniAudioPlayerManager.onSavePosition = { taskId, positionMs ->
+            savePlaybackPosition(taskId, positionMs)
+        }
+        refreshTempCacheSize()
+    }
+
+    override fun onCleared() {
+        container.miniAudioPlayerManager.onSavePosition = null
+        super.onCleared()
+    }
 
     fun onUrlInputChange(value: String) {
         _urlInput.value = value
@@ -215,12 +262,65 @@ class MainViewModel(
         if (current?.id == task.id) {
             container.miniAudioPlayerManager.togglePlayPause()
         } else {
+            _lyricsOverride.value = task.lyricsText
             container.miniAudioPlayerManager.play(task)
+            if (settings.value.autoFetchLyrics && task.lyricsText.isNullOrBlank()) {
+                fetchLyricsForTask(task.id)
+            }
         }
+    }
+
+    fun playAudioQueue(tasks: List<DownloadTask>, startIndex: Int = 0) {
+        if (tasks.isEmpty()) return
+        val target = tasks.getOrNull(startIndex) ?: tasks.first()
+        _lyricsOverride.value = target.lyricsText
+        container.miniAudioPlayerManager.playQueue(
+            tasks = tasks,
+            startIndex = startIndex,
+            playAsBackgroundVideoAudio = false
+        )
+        if (settings.value.autoFetchLyrics && target.lyricsText.isNullOrBlank()) {
+            fetchLyricsForTask(target.id)
+        }
+    }
+
+    fun playVideoAsBackgroundAudio(
+        task: DownloadTask,
+        startPositionMs: Long = task.lastPlaybackPositionMs
+    ) {
+        _lyricsOverride.value = task.lyricsText
+        container.miniAudioPlayerManager.playAsBackgroundAudio(
+            task = task,
+            startPositionMs = startPositionMs
+        )
+    }
+
+    fun playNextAudio() {
+        container.miniAudioPlayerManager.playNext()
+        val nextTask = miniPlayerState.value.currentTask
+        _lyricsOverride.value = nextTask?.lyricsText
+    }
+
+    fun playPreviousAudio() {
+        container.miniAudioPlayerManager.playPrevious()
+        val prevTask = miniPlayerState.value.currentTask
+        _lyricsOverride.value = prevTask?.lyricsText
+    }
+
+    fun toggleAudioShuffle() {
+        container.miniAudioPlayerManager.toggleShuffle()
+    }
+
+    fun cycleAudioRepeatMode() {
+        container.miniAudioPlayerManager.cycleRepeatMode()
     }
 
     fun togglePlayPause() {
         container.miniAudioPlayerManager.togglePlayPause()
+    }
+
+    fun pauseMiniPlayer() {
+        container.miniAudioPlayerManager.pause()
     }
 
     fun seekTo(ms: Long) {
@@ -228,7 +328,248 @@ class MainViewModel(
     }
 
     fun stopMiniPlayer() {
+        _lyricsOverride.value = null
         container.miniAudioPlayerManager.stop()
+    }
+
+    fun savePlaybackPosition(taskId: String, positionMs: Long) {
+        viewModelScope.launch {
+            container.downloadRepository.savePlaybackPosition(taskId, positionMs)
+        }
+    }
+
+    fun toggleFavorite(taskId: String) {
+        viewModelScope.launch {
+            container.downloadRepository.toggleFavorite(taskId)
+        }
+    }
+
+    fun toggleVault(taskId: String) {
+        viewModelScope.launch {
+            val result = container.downloadRepository.toggleVault(taskId)
+            result.fold(
+                onSuccess = { inVault ->
+                    _studioMessage.value = if (inVault) {
+                        "Medya Özel Kasaya taşındı."
+                    } else {
+                        "Medya Özel Kasadan çıkarıldı."
+                    }
+                },
+                onFailure = { error ->
+                    _studioMessage.value = ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Özel Kasa işlemi gerçekleştirilemedi."
+                    )
+                }
+            )
+        }
+    }
+
+    fun fetchLyricsForTask(taskId: String) {
+        if (_isFetchingLyrics.value) return
+        viewModelScope.launch {
+            _isFetchingLyrics.value = true
+            try {
+                val lyrics = runCatching {
+                    container.downloadRepository.fetchOrRefreshLyrics(taskId)
+                }.getOrNull()
+                if (!lyrics.isNullOrBlank()) {
+                    _lyricsOverride.value = lyrics
+                    val current = miniPlayerState.value.currentTask
+                    if (current?.id == taskId) {
+                        container.miniAudioPlayerManager.updateCurrentTaskMetadata(
+                            current.copy(lyricsText = lyrics)
+                        )
+                    }
+                }
+            } finally {
+                _isFetchingLyrics.value = false
+            }
+        }
+    }
+
+    fun unlockApp() {
+        _isAppUnlocked.value = true
+    }
+
+    fun unlockVault() {
+        _isVaultUnlocked.value = true
+    }
+
+    fun lockVault() {
+        _isVaultUnlocked.value = false
+    }
+
+    // FFmpeg Medya Stüdyosu Pro
+    fun runFfmpegStudioPro(
+        task: DownloadTask,
+        action: FfmpegStudioAction,
+        options: FfmpegStudioOptions
+    ) {
+        if (_studioBusy.value) return
+        viewModelScope.launch {
+            _studioBusy.value = true
+            _studioMessage.value = "${action.displayName} işleniyor..."
+            waitForEngineIfInitializing()
+            val result = container.downloadRepository.processFfmpegStudioPro(
+                task = task,
+                action = action,
+                options = options
+            )
+            _studioMessage.value = result.fold(
+                onSuccess = { created ->
+                    "${action.displayName} tamamlandı: ${created.title}"
+                },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Stüdyo işlemi tamamlanamadı."
+                    )
+                }
+            )
+            _studioBusy.value = false
+            refreshTempCacheSize()
+        }
+    }
+
+    // Takip Edilen Kanallar
+    fun followChannel(urlOrHandle: String, autoDownload: Boolean = false) {
+        viewModelScope.launch {
+            val result = container.downloadRepository.followChannel(urlOrHandle, autoDownload)
+            _studioMessage.value = result.fold(
+                onSuccess = { channel -> "${channel.title} takibe alındı." },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Kanal takip edilemedi."
+                    )
+                }
+            )
+        }
+    }
+
+    fun unfollowChannel(channelId: String) {
+        viewModelScope.launch {
+            container.downloadRepository.unfollowChannel(channelId)
+            _studioMessage.value = "Kanal takipten çıkarıldı."
+        }
+    }
+
+    fun toggleChannelAutoDownload(channelId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            container.downloadRepository.toggleChannelAutoDownload(channelId, enabled)
+        }
+    }
+
+    fun checkFollowedChannels() {
+        if (_isCheckingChannels.value) return
+        viewModelScope.launch {
+            _isCheckingChannels.value = true
+            val result = container.downloadRepository.checkFollowedChannels()
+            _studioMessage.value = result.fold(
+                onSuccess = { updated ->
+                    if (updated.isEmpty()) {
+                        "Yeni video bulunamadı."
+                    } else {
+                        "${updated.size} kanalda yeni içerik tespit edildi!"
+                    }
+                },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Kanallar kontrol edilemedi."
+                    )
+                }
+            )
+            _isCheckingChannels.value = false
+        }
+    }
+
+    // Depolama, PoToken ve Yedekleme
+    fun refreshTempCacheSize() {
+        viewModelScope.launch {
+            val bytes = withContext(Dispatchers.IO) {
+                runCatching { container.downloadRepository.calculateTempCacheBytes() }.getOrDefault(0L)
+            }
+            _tempCacheBytes.value = bytes
+        }
+    }
+
+    fun clearTempCache() {
+        viewModelScope.launch {
+            val cleared = withContext(Dispatchers.IO) {
+                runCatching { container.downloadRepository.clearTempCache() }.getOrDefault(0L)
+            }
+            _tempCacheBytes.value = withContext(Dispatchers.IO) {
+                runCatching { container.downloadRepository.calculateTempCacheBytes() }.getOrDefault(0L)
+            }
+            val sizeLabel = FormatUtils.formatBytes(cleared).ifBlank { "0 B" }
+            _studioMessage.value = "Geçici önbellek temizlendi ($sizeLabel boşaltıldı)."
+        }
+    }
+
+    fun refreshPoToken() {
+        if (_fetchingPoToken.value) return
+        viewModelScope.launch {
+            _fetchingPoToken.value = true
+            val ok = runCatching {
+                container.downloadRepository.refreshYouTubePoToken()
+            }.getOrDefault(false)
+            _studioMessage.value = if (ok) {
+                "YouTube PoToken başarıyla yenilendi."
+            } else {
+                "PoToken yenilenemedi. İnternet bağlantınızı kontrol edin."
+            }
+            _fetchingPoToken.value = false
+        }
+    }
+
+    fun exportBackup(uri: Uri) {
+        viewModelScope.launch {
+            val result = container.downloadRepository.exportBackup(uri)
+            _studioMessage.value = result.fold(
+                onSuccess = { count -> "Yedek dışa aktarıldı ($count öğe)." },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Yedek dışa aktarılamadı."
+                    )
+                }
+            )
+        }
+    }
+
+    fun importBackup(uri: Uri) {
+        viewModelScope.launch {
+            val result = container.downloadRepository.importBackup(uri)
+            _studioMessage.value = result.fold(
+                onSuccess = { summary -> summary },
+                onFailure = { error ->
+                    ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Yedek içe aktarılamadı."
+                    )
+                }
+            )
+        }
+    }
+
+    fun pause(taskId: String) {
+        viewModelScope.launch {
+            container.downloadRepository.pause(taskId)
+        }
+    }
+
+    fun pauseAllActive() {
+        viewModelScope.launch {
+            container.downloadRepository.pauseAllActive()
+        }
+    }
+
+    fun resumeAllPaused() {
+        viewModelScope.launch {
+            container.downloadRepository.resumeAllPaused()
+        }
     }
 
     // FFmpeg Medya Stüdyosu
@@ -284,6 +625,25 @@ class MainViewModel(
                     _cookieMessage.value = ErrorMessageSanitizer.sanitize(
                         throwable = error,
                         fallback = "Çerez dosyası içe aktarılamadı."
+                    )
+                }
+            )
+        }
+    }
+
+    fun syncWebViewCookies() {
+        viewModelScope.launch {
+            val result = container.cookieRepository.syncFromWebViewCookieManager()
+            result.fold(
+                onSuccess = { count ->
+                    _hasCookies.value = container.cookieRepository.hasCookies()
+                    container.settingsRepository.setCookiesEnabled(true)
+                    _cookieMessage.value = "Tarayıcı oturumu kaydedildi ($count çerez)."
+                },
+                onFailure = { error ->
+                    _cookieMessage.value = ErrorMessageSanitizer.sanitize(
+                        throwable = error,
+                        fallback = "Tarayıcı çerezleri kaydedilemedi."
                     )
                 }
             )
@@ -412,6 +772,70 @@ class MainViewModel(
     fun setCookiesEnabled(enabled: Boolean) {
         viewModelScope.launch {
             container.settingsRepository.setCookiesEnabled(enabled)
+        }
+    }
+
+    fun setParallelDownloadEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setParallelDownloadEnabled(enabled)
+        }
+    }
+
+    fun setParallelConnectionCount(count: Int) {
+        viewModelScope.launch {
+            container.settingsRepository.setParallelConnectionCount(count)
+        }
+    }
+
+    fun setMaxConcurrentDownloads(count: Int) {
+        viewModelScope.launch {
+            container.settingsRepository.setMaxConcurrentDownloads(count)
+        }
+    }
+
+    fun setMaxDownloadSpeedKbps(kbps: Int) {
+        viewModelScope.launch {
+            container.settingsRepository.setMaxDownloadSpeedKbps(kbps)
+        }
+    }
+
+    fun setScheduledDownloadEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setScheduledDownloadEnabled(enabled)
+        }
+    }
+
+    fun setScheduleWindowHours(startHour: Int, endHour: Int) {
+        viewModelScope.launch {
+            container.settingsRepository.setScheduleWindowHours(startHour, endHour)
+        }
+    }
+
+    fun setPoTokenEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setPoTokenEnabled(enabled)
+        }
+    }
+
+    fun setAutoFetchLyrics(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setAutoFetchLyrics(enabled)
+        }
+    }
+
+    fun setAppLockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            container.settingsRepository.setAppLockEnabled(enabled)
+            if (enabled) {
+                _isAppUnlocked.value = true
+            }
+        }
+    }
+
+    fun setEqualizerPreset(preset: EqualizerPreset) {
+        container.miniAudioPlayerManager.applyEqualizerPreset(preset)
+        viewModelScope.launch {
+            container.settingsRepository.setEqualizerPreset(preset)
         }
     }
 

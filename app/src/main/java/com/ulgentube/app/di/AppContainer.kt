@@ -1,15 +1,22 @@
 package com.ulgentube.app.di
 
 import android.content.Context
+import com.ulgentube.app.data.BackupRestoreManager
 import com.ulgentube.app.data.DownloadRepository
 import com.ulgentube.app.data.local.DownloadDao
+import com.ulgentube.app.data.local.FollowedChannelDao
 import com.ulgentube.app.data.local.SettingsRepository
 import com.ulgentube.app.data.local.UlgenTubeDatabase
+import com.ulgentube.app.engine.ChannelFeedChecker
 import com.ulgentube.app.engine.CookieRepository
 import com.ulgentube.app.engine.HybridMediaExtractor
 import com.ulgentube.app.engine.LocalFfmpegProcessor
+import com.ulgentube.app.engine.LrcLyricsFetcher
 import com.ulgentube.app.engine.MediaStoreSaver
+import com.ulgentube.app.engine.ParallelRangeDownloader
 import com.ulgentube.app.engine.SocialImageExtractor
+import com.ulgentube.app.engine.YouTubeInnertubeEngine
+import com.ulgentube.app.engine.YouTubePoTokenProvider
 import com.ulgentube.app.engine.YtDlpEngine
 import com.ulgentube.app.player.MiniAudioPlayerManager
 import com.ulgentube.app.util.NetworkSecurityGuard
@@ -26,10 +33,17 @@ interface AppContainer {
     val okHttpClient: OkHttpClient
     val database: UlgenTubeDatabase
     val downloadDao: DownloadDao
+    val followedChannelDao: FollowedChannelDao
     val settingsRepository: SettingsRepository
     val cookieRepository: CookieRepository
+    val parallelRangeDownloader: ParallelRangeDownloader
     val ytDlpEngine: YtDlpEngine
     val socialImageExtractor: SocialImageExtractor
+    val youTubeInnertubeEngine: YouTubeInnertubeEngine
+    val youTubePoTokenProvider: YouTubePoTokenProvider
+    val lrcLyricsFetcher: LrcLyricsFetcher
+    val channelFeedChecker: ChannelFeedChecker
+    val backupRestoreManager: BackupRestoreManager
     val hybridMediaExtractor: HybridMediaExtractor
     val mediaStoreSaver: MediaStoreSaver
     val localFfmpegProcessor: LocalFfmpegProcessor
@@ -65,12 +79,20 @@ class DefaultAppContainer(
         database.downloadDao()
     }
 
+    override val followedChannelDao: FollowedChannelDao by lazy {
+        database.followedChannelDao()
+    }
+
     override val settingsRepository: SettingsRepository by lazy {
         SettingsRepository(applicationContext)
     }
 
     override val cookieRepository: CookieRepository by lazy {
         CookieRepository(applicationContext)
+    }
+
+    override val parallelRangeDownloader: ParallelRangeDownloader by lazy {
+        ParallelRangeDownloader(okHttpClient)
     }
 
     override val ytDlpEngine: YtDlpEngine by lazy {
@@ -81,13 +103,10 @@ class DefaultAppContainer(
     }
 
     override val socialImageExtractor: SocialImageExtractor by lazy {
-        SocialImageExtractor(okHttpClient = okHttpClient)
-    }
-
-    override val hybridMediaExtractor: HybridMediaExtractor by lazy {
-        HybridMediaExtractor(
-            ytDlpEngine = ytDlpEngine,
-            socialImageExtractor = socialImageExtractor
+        SocialImageExtractor(
+            okHttpClient = okHttpClient,
+            parallelRangeDownloader = parallelRangeDownloader,
+            cookieRepository = cookieRepository
         )
     }
 
@@ -102,6 +121,52 @@ class DefaultAppContainer(
         )
     }
 
+    override val youTubePoTokenProvider: YouTubePoTokenProvider by lazy {
+        YouTubePoTokenProvider(
+            context = applicationContext,
+            settingsRepository = settingsRepository
+        )
+    }
+
+    override val youTubeInnertubeEngine: YouTubeInnertubeEngine by lazy {
+        YouTubeInnertubeEngine(
+            okHttpClient = okHttpClient,
+            localFfmpegProcessor = localFfmpegProcessor,
+            parallelRangeDownloader = parallelRangeDownloader,
+            cookieRepository = cookieRepository,
+            poTokenProvider = youTubePoTokenProvider
+        )
+    }
+
+    override val lrcLyricsFetcher: LrcLyricsFetcher by lazy {
+        LrcLyricsFetcher(okHttpClient)
+    }
+
+    override val channelFeedChecker: ChannelFeedChecker by lazy {
+        ChannelFeedChecker(okHttpClient)
+    }
+
+    override val backupRestoreManager: BackupRestoreManager by lazy {
+        BackupRestoreManager(
+            context = applicationContext,
+            downloadDao = downloadDao,
+            followedChannelDao = followedChannelDao,
+            settingsRepository = settingsRepository
+        )
+    }
+
+    override val hybridMediaExtractor: HybridMediaExtractor by lazy {
+        HybridMediaExtractor(
+            ytDlpEngine = ytDlpEngine,
+            socialImageExtractor = socialImageExtractor,
+            youTubeInnertubeEngine = youTubeInnertubeEngine,
+            appContext = applicationContext,
+            settingsRepository = settingsRepository,
+            cookieRepository = cookieRepository,
+            poTokenProvider = youTubePoTokenProvider
+        )
+    }
+
     override val miniAudioPlayerManager: MiniAudioPlayerManager by lazy {
         MiniAudioPlayerManager(applicationContext)
     }
@@ -113,7 +178,15 @@ class DefaultAppContainer(
             settingsRepository = settingsRepository,
             ytDlpEngine = ytDlpEngine,
             socialImageExtractor = socialImageExtractor,
-            mediaStoreSaver = mediaStoreSaver
+            youTubeInnertubeEngine = youTubeInnertubeEngine,
+            mediaStoreSaver = mediaStoreSaver,
+            localFfmpegProcessor = localFfmpegProcessor,
+            followedChannelDao = followedChannelDao,
+            channelFeedChecker = channelFeedChecker,
+            lrcLyricsFetcher = lrcLyricsFetcher,
+            youTubePoTokenProvider = youTubePoTokenProvider,
+            backupRestoreManager = backupRestoreManager,
+            parallelRangeDownloader = parallelRangeDownloader
         )
     }
 }
